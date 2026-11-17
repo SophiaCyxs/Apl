@@ -1,0 +1,6 @@
+{
+  "name": "BloxLua",
+  "description": "Roblox Lua 5.1 and Executor Lua compiler, sandboxed self-environment, and real-time terminal frame renderer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
