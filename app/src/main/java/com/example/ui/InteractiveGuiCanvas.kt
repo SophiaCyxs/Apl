@@ -5,13 +5,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -22,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -50,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import com.example.lua.GuiDrawCommand
 import com.example.lua.GuiRenderScene
 import com.example.ui.theme.LocalBloxPalette
+import com.example.ui.theme.LocalBloxVisuals
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -63,31 +69,39 @@ fun InteractiveGuiCanvas(
   codeFont: FontFamily,
   onViewportSizeDp: (Float, Float) -> Unit,
   onTapTarget: (Int) -> Unit,
+  onTextBoxTap: (instanceId: Int, currentText: String, name: String) -> Unit = { _, _, _ -> },
   onDragTarget: (instanceId: Int, dxNorm: Double, dyNorm: Double, dxLogical: Double, dyLogical: Double) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val palette = LocalBloxPalette.current
+  val visuals = LocalBloxVisuals.current
   val density = LocalDensity.current
   val textMeasurer = rememberTextMeasurer()
 
   val latestScene by rememberUpdatedState(scene)
   val latestTap by rememberUpdatedState(onTapTarget)
+  val latestTextBoxTap by rememberUpdatedState(onTextBoxTap)
   val latestDrag by rememberUpdatedState(onDragTarget)
 
   var pressedInstanceId by remember { mutableStateOf<Int?>(null) }
   var activeDragId by remember { mutableStateOf<Int?>(null) }
 
+  val shape = RoundedCornerShape(16.dp)
+  val elev = visuals.panelShadowDp.coerceIn(0f, 24f).dp
+  val bgAlpha = if (visuals.hasBackdrop) visuals.panelOpacity.coerceIn(0.45f, 1f) else 1f
+
   Box(
     modifier =
       modifier
         .fillMaxWidth()
-        .height(236.dp)
-        .clip(RoundedCornerShape(4.dp))
-        .background(palette.terminalBg)
+        .height(240.dp)
+        .let { m -> if (elev > 0.dp) m.shadow(elev, shape, clip = false) else m }
+        .clip(shape)
+        .background(palette.terminalBg.copy(alpha = bgAlpha))
         .border(
           1.dp,
-          if (isRunning) MaterialTheme.colorScheme.primary else palette.border,
-          RoundedCornerShape(4.dp),
+          if (isRunning) MaterialTheme.colorScheme.primary else palette.border.copy(alpha = if (visuals.hasBackdrop) 0.78f else 1f),
+          shape,
         )
         .onSizeChanged { intSize ->
           if (intSize.width > 0 && intSize.height > 0) {
@@ -99,13 +113,13 @@ fun InteractiveGuiCanvas(
         .testTag("gui_preview_canvas"),
   ) {
     val activeScene = scene
-    if (activeScene == null || (activeScene.frameNumber == 0L && activeScene.commands.isEmpty())) {
+    if (activeScene == null || (activeScene.frameNumber == 0L && activeScene.commands.isEmpty() && activeScene.notifications.isEmpty())) {
       Box(
         modifier = Modifier.fillMaxSize().padding(14.dp),
         contentAlignment = Alignment.CenterStart,
       ) {
         Text(
-          text = "> drawing processor idle · run ScreenGui / Frame / Drawing script",
+          text = "> drawing processor idle · run ScreenGui / LocalScript / UI Lib script",
           style =
             TextStyle(
               fontFamily = codeFont,
@@ -128,7 +142,7 @@ fun InteractiveGuiCanvas(
                     val ly = offset.y * (s.height / size.height.toFloat())
                     val hit =
                       s.hitTargets.asReversed().firstOrNull {
-                        it.isClickable && it.contains(lx, ly)
+                        (it.isClickable || it.isTextInput) && it.contains(lx, ly)
                       }
                     pressedInstanceId = hit?.instanceId
                   }
@@ -142,10 +156,14 @@ fun InteractiveGuiCanvas(
                   val ly = offset.y * (s.height / size.height.toFloat())
                   val hit =
                     s.hitTargets.asReversed().firstOrNull {
-                      it.isClickable && it.contains(lx, ly)
+                      (it.isClickable || it.isTextInput) && it.contains(lx, ly)
                     }
                   if (hit != null) {
-                    latestTap(hit.instanceId)
+                    if (hit.isTextInput) {
+                      latestTextBoxTap(hit.instanceId, hit.label ?: "", hit.name)
+                    } else {
+                      latestTap(hit.instanceId)
+                    }
                   }
                 },
               )
@@ -185,9 +203,8 @@ fun InteractiveGuiCanvas(
 
         var saveDepth = 0
         try {
-          // Subtle technical viewport dot/line grid background
           val gridStep = 24f * scaleAvg
-          val gridColor = palette.border.copy(alpha = 0.28f)
+          val gridColor = palette.border.copy(alpha = 0.25f)
           var gx = gridStep
           while (gx < size.width) {
             drawLine(gridColor, Offset(gx, 0f), Offset(gx, size.height), strokeWidth = 1f)
@@ -315,7 +332,7 @@ fun InteractiveGuiCanvas(
               }
 
               is GuiDrawCommand.DrawText -> {
-                if (cmd.textAlpha <= 0.005f) continue
+                if (cmd.textAlpha <= 0.005f || cmd.text.isEmpty()) continue
                 val boxX = cmd.x * sx
                 val boxY = cmd.y * sy
                 val boxW = max(8f, cmd.width * sx)
@@ -330,19 +347,24 @@ fun InteractiveGuiCanvas(
                   } else {
                     FontFamily.SansSerif
                   }
+                val effectiveAlpha = if (cmd.isPlaceholder) cmd.textAlpha * 0.7f else cmd.textAlpha
                 val style =
                   TextStyle(
                     fontFamily = textFamily,
                     fontSize = fontSp,
                     fontWeight = if (cmd.isBold) FontWeight.SemiBold else FontWeight.Normal,
-                    color = Color(cmd.textArgb).copy(alpha = cmd.textAlpha),
+                    color = Color(cmd.textArgb).copy(alpha = effectiveAlpha),
                   )
+                val maxLines =
+                  if (cmd.textWrapped) max(1, (boxH / (computedFontPx * 1.15f)).toInt())
+                  else 1
                 val layout =
                   textMeasurer.measure(
                     text = AnnotatedString(cmd.text),
                     style = style,
                     overflow = TextOverflow.Ellipsis,
-                    maxLines = max(1, (boxH / (computedFontPx * 1.15f)).toInt()),
+                    softWrap = cmd.textWrapped,
+                    maxLines = maxLines,
                     constraints = Constraints(maxWidth = boxW.roundToInt(), maxHeight = boxH.roundToInt()),
                   )
                 val tx =
@@ -371,28 +393,45 @@ fun InteractiveGuiCanvas(
                 val cx = l + w * 0.5f
                 val cy = t + h * 0.5f
                 val half = iconSz * 0.5f
-                drawRoundRect(
-                  color = tint,
-                  topLeft = Offset(cx - half, cy - half),
-                  size = Size(iconSz, iconSz),
-                  cornerRadius = CornerRadius(4f * scaleAvg, 4f * scaleAvg),
-                  style = Stroke(width = 1.5f * scaleAvg),
-                )
-                drawCircle(
-                  color = tint,
-                  radius = iconSz * 0.14f,
-                  center = Offset(cx - half * 0.35f, cy - half * 0.3f),
-                )
-                val mountain =
-                  Path().apply {
-                    moveTo(cx - half * 0.7f, cy + half * 0.55f)
-                    lineTo(cx - half * 0.1f, cy - half * 0.1f)
-                    lineTo(cx + half * 0.2f, cy + half * 0.25f)
-                    lineTo(cx + half * 0.45f, cy - half * 0.05f)
-                    lineTo(cx + half * 0.7f, cy + half * 0.55f)
-                    close()
-                  }
-                drawPath(mountain, color = tint)
+                if (cmd.imageId == "viewport") {
+                  // 3D wireframe cube icon for ViewportFrame
+                  val offset3d = half * 0.35f
+                  drawRect(
+                    color = tint,
+                    topLeft = Offset(cx - half, cy - half + offset3d),
+                    size = Size(iconSz - offset3d, iconSz - offset3d),
+                    style = Stroke(width = 1.4f * scaleAvg),
+                  )
+                  drawRect(
+                    color = tint,
+                    topLeft = Offset(cx - half + offset3d, cy - half),
+                    size = Size(iconSz - offset3d, iconSz - offset3d),
+                    style = Stroke(width = 1.4f * scaleAvg),
+                  )
+                } else {
+                  drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(cx - half, cy - half),
+                    size = Size(iconSz, iconSz),
+                    cornerRadius = CornerRadius(4f * scaleAvg, 4f * scaleAvg),
+                    style = Stroke(width = 1.5f * scaleAvg),
+                  )
+                  drawCircle(
+                    color = tint,
+                    radius = iconSz * 0.14f,
+                    center = Offset(cx - half * 0.35f, cy - half * 0.3f),
+                  )
+                  val mountain =
+                    Path().apply {
+                      moveTo(cx - half * 0.7f, cy + half * 0.55f)
+                      lineTo(cx - half * 0.1f, cy - half * 0.1f)
+                      lineTo(cx + half * 0.2f, cy + half * 0.25f)
+                      lineTo(cx + half * 0.45f, cy - half * 0.05f)
+                      lineTo(cx + half * 0.7f, cy + half * 0.55f)
+                      close()
+                    }
+                  drawPath(mountain, color = tint)
+                }
               }
 
               is GuiDrawCommand.DrawScrollBar -> {
@@ -511,6 +550,48 @@ fun InteractiveGuiCanvas(
           while (saveDepth > 0) {
             drawContext.canvas.restore()
             saveDepth--
+          }
+        }
+      }
+
+      // StarterGui:SetCore("SendNotification") Toast Overlay
+      val notifs = activeScene.notifications
+      if (notifs.isNotEmpty()) {
+        Column(
+          modifier =
+            Modifier
+              .align(Alignment.BottomEnd)
+              .padding(8.dp)
+              .widthIn(max = 220.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+          notifs.forEach { n ->
+            Surface(
+              shape = RoundedCornerShape(6.dp),
+              color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+              shadowElevation = 4.dp,
+              modifier = Modifier.border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f), RoundedCornerShape(6.dp)),
+            ) {
+              Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                Text(
+                  text = n.title,
+                  style = MaterialTheme.typography.labelSmall,
+                  fontWeight = FontWeight.Bold,
+                  color = MaterialTheme.colorScheme.onSurface,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+                if (n.text.isNotEmpty()) {
+                  Text(
+                    text = n.text,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = palette.textMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                }
+              }
+            }
           }
         }
       }

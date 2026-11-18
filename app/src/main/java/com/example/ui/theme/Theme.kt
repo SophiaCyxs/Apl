@@ -1,14 +1,37 @@
 package com.example.ui.theme
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.example.data.AppSettings
+import kotlin.math.roundToInt
 
 @Immutable
 data class BloxPalette(
@@ -23,6 +46,23 @@ data class BloxPalette(
   val accent: Color,
   val syntax: SyntaxColors,
 )
+
+@Immutable
+data class BloxVisuals(
+  val syntaxGradientEnabled: Boolean = false,
+  val syntaxGradientMoving: Boolean = true,
+  val fontGradientMoving: Boolean = false,
+  val gradientColors: List<Color> = SyntaxGradientPreset.SILVER_MIST.colors,
+  val panelOpacity: Float = 0.88f,
+  val panelShadowDp: Float = 6f,
+  val hasBackdrop: Boolean = true,
+) {
+  fun effectivePanelAlpha(): Float = if (hasBackdrop) panelOpacity else 1f
+}
+
+val LocalBloxVisuals = staticCompositionLocalOf { BloxVisuals() }
+
+val LocalGradientPhaseState = staticCompositionLocalOf<State<Float>> { mutableFloatStateOf(0f) }
 
 val LocalBloxPalette =
   staticCompositionLocalOf {
@@ -39,6 +79,64 @@ val LocalBloxPalette =
       syntax = MonoDarkSyntax,
     )
   }
+
+@Composable
+fun Modifier.bloxSurface(
+  shape: Shape = RoundedCornerShape(14.dp),
+  color: Color = MaterialTheme.colorScheme.surface,
+  borderColor: Color = LocalBloxPalette.current.border,
+  alphaOverride: Float? = null,
+): Modifier {
+  val visuals = LocalBloxVisuals.current
+  val palette = LocalBloxPalette.current
+  val alpha = (alphaOverride ?: visuals.effectivePanelAlpha()).coerceIn(0.2f, 1f)
+  val elev = visuals.panelShadowDp.coerceIn(0f, 14f).dp
+  val topRimColor =
+    if (palette.isDark) Color.White.copy(alpha = if (visuals.hasBackdrop) 0.16f else 0.10f)
+    else borderColor.copy(alpha = 0.85f)
+  val bottomRimColor = borderColor.copy(alpha = if (visuals.hasBackdrop) 0.45f else 0.85f)
+  val rimBrush =
+    remember(topRimColor, bottomRimColor) {
+      Brush.verticalGradient(listOf(topRimColor, bottomRimColor))
+    }
+  return this
+    .let { mod ->
+      if (elev > 0.5.dp) mod.shadow(elevation = elev, shape = shape, clip = false) else mod
+    }
+    .background(color.copy(alpha = alpha), shape)
+    .border(1.dp, rimBrush, shape)
+}
+
+@Composable
+fun MovingGradientText(
+  text: String,
+  style: TextStyle,
+  modifier: Modifier = Modifier,
+  color: Color = Color.Unspecified,
+  fontWeight: FontWeight? = null,
+  maxLines: Int = Int.MAX_VALUE,
+  overflow: TextOverflow = TextOverflow.Clip,
+  force: Boolean = false,
+) {
+  val visuals = LocalBloxVisuals.current
+  val useGradient = visuals.fontGradientMoving || force
+  val effectiveStyle =
+    if (useGradient) {
+      val phase = LocalGradientPhaseState.current.value
+      style.copy(brush = buildMovingGradientBrush(visuals.gradientColors, phase, spanPx = 560f))
+    } else {
+      style
+    }
+  Text(
+    text = text,
+    style = effectiveStyle,
+    color = if (useGradient) Color.Unspecified else color,
+    fontWeight = fontWeight,
+    maxLines = maxLines,
+    overflow = overflow,
+    modifier = modifier,
+  )
+}
 
 private val MonoDarkScheme =
   darkColorScheme(
@@ -176,15 +274,16 @@ private val CobaltLightScheme =
 fun BloxLuaTheme(
   darkTheme: Boolean = true,
   themePalette: ThemePalette = ThemePalette.MONOCHROME,
+  settings: AppSettings? = null,
   content: @Composable () -> Unit,
 ) {
   val colorScheme: ColorScheme
-  val palette: BloxPalette
+  val basePalette: BloxPalette
 
   when (themePalette) {
     ThemePalette.MONOCHROME -> {
       colorScheme = if (darkTheme) MonoDarkScheme else MonoLightScheme
-      palette =
+      basePalette =
         if (darkTheme) {
           BloxPalette(
             isDark = true,
@@ -215,7 +314,7 @@ fun BloxLuaTheme(
     }
     ThemePalette.PHOSPHOR -> {
       colorScheme = if (darkTheme) PhosphorDarkScheme else PhosphorLightScheme
-      palette =
+      basePalette =
         if (darkTheme) {
           BloxPalette(
             isDark = true,
@@ -246,7 +345,7 @@ fun BloxLuaTheme(
     }
     ThemePalette.COBALT -> {
       colorScheme = if (darkTheme) CobaltDarkScheme else CobaltLightScheme
-      palette =
+      basePalette =
         if (darkTheme) {
           BloxPalette(
             isDark = true,
@@ -277,7 +376,78 @@ fun BloxLuaTheme(
     }
   }
 
-  CompositionLocalProvider(LocalBloxPalette provides palette) {
+  val palette =
+    if (settings != null) {
+      basePalette.copy(
+        syntax =
+          basePalette.syntax.withOverrides(
+            keywordArgb = settings.syntaxKeywordArgb,
+            typeArgb = settings.syntaxTypeArgb,
+            executorArgb = settings.syntaxExecutorArgb,
+            builtinArgb = settings.syntaxBuiltinArgb,
+            stringArgb = settings.syntaxStringArgb,
+            numberArgb = settings.syntaxNumberArgb,
+            commentArgb = settings.syntaxCommentArgb,
+            operatorArgb = settings.syntaxOperatorArgb,
+          )
+      )
+    } else {
+      basePalette
+    }
+
+  val shouldAnimateGradient =
+    settings != null &&
+      ((settings.syntaxGradientEnabled && settings.syntaxGradientMoving) || settings.fontGradientMoving)
+
+  val phaseState: State<Float> =
+    if (shouldAnimateGradient) {
+      val speed = (settings?.gradientSpeed ?: 1f).coerceIn(0.2f, 3f)
+      val durationMs = (5500f / speed).roundToInt().coerceIn(1400, 20000)
+      val transition = rememberInfiniteTransition(label = "blox_gradient_motion")
+      transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec =
+          infiniteRepeatable(
+            animation = tween(durationMillis = durationMs, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+          ),
+        label = "gradient_phase",
+      )
+    } else {
+      remember { mutableFloatStateOf(0f) }
+    }
+
+  val visuals =
+    remember(
+      settings?.syntaxGradientEnabled,
+      settings?.syntaxGradientMoving,
+      settings?.fontGradientMoving,
+      settings?.gradientPreset,
+      settings?.panelOpacity,
+      settings?.panelShadowDp,
+      settings?.backgroundMode,
+    ) {
+      if (settings != null) {
+        BloxVisuals(
+          syntaxGradientEnabled = settings.syntaxGradientEnabled,
+          syntaxGradientMoving = settings.syntaxGradientMoving,
+          fontGradientMoving = settings.fontGradientMoving,
+          gradientColors = settings.gradientPreset.colors,
+          panelOpacity = settings.panelOpacity,
+          panelShadowDp = settings.panelShadowDp,
+          hasBackdrop = settings.backgroundMode != BackgroundMode.SOLID,
+        )
+      } else {
+        BloxVisuals()
+      }
+    }
+
+  CompositionLocalProvider(
+    LocalBloxPalette provides palette,
+    LocalBloxVisuals provides visuals,
+    LocalGradientPhaseState provides phaseState,
+  ) {
     MaterialTheme(colorScheme = colorScheme, typography = AppTypography, content = content)
   }
 }

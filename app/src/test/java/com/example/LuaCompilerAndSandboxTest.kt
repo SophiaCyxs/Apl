@@ -241,4 +241,129 @@ class LuaCompilerAndSandboxTest {
     assertTrue("Panel should have moved right after drag", movedPanel.x > panelRect.x + 20f)
     scope.cancel()
   }
+
+  @Test
+  fun `executes LocalScript ModuleScript require coroutines Lua patterns and JSON`() = runBlocking {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    val logs = mutableListOf<Pair<LogLevel, String>>()
+    val vm = LuaVm()
+    val env =
+      RobloxSandboxEnv(
+        scope = scope,
+        getExecutionIntervalMs = { 50L },
+        onLog = { lvl, msg -> logs.add(lvl to msg) },
+        onUiDirty = {},
+        onClipboard = {},
+      )
+    env.attachToVm(vm)
+
+    val source =
+      """
+      local HttpService = game:GetService("HttpService")
+      local StarterGui = game:GetService("StarterGui")
+
+      -- ModuleScript + cached require()
+      local mod = Instance.new("ModuleScript")
+      mod.Name = "CounterMod"
+      mod.Source = [[
+        local M = { hits = 0 }
+        function M.bump(n) M.hits = M.hits + n; return M.hits end
+        return M
+      ]]
+      local a = require(mod)
+      local b = require(mod)
+      assert(a == b, "require must cache module table")
+      local mRes = a.bump(3) + b.bump(4)
+
+      -- Coroutine create/resume/yield
+      local co = coroutine.create(function(x)
+        local y = coroutine.yield(x + 1)
+        return y * 2
+      end)
+      local ok1, r1 = coroutine.resume(co, 10)
+      local ok2, r2 = coroutine.resume(co, 20)
+
+      -- Lua patterns + table helpers
+      local matched = string.match("HP: 95%", "HP:%s*(%d+)")
+      local arr = { 10, 20, 30 }
+      local clonedArr = table.clone(arr)
+      local foundIdx = table.find(clonedArr, 20)
+
+      -- Instance:Clone + GetPropertyChangedSignal
+      local rootGui = Instance.new("ScreenGui", gethui())
+      local canvas = Instance.new("CanvasGroup", rootGui)
+      canvas.Position = UDim2.new(0, 0, 0, 0)
+      canvas.Size = UDim2.new(1, 0, 1, 0)
+      local scaler = Instance.new("UIScale", canvas)
+      scaler.Scale = 0.5
+
+      local label = Instance.new("TextLabel", canvas)
+      label.Size = UDim2.new(0, 200, 0, 60)
+      label.RichText = true
+      label.Text = "<b>Initial</b>"
+      local changedHit = 0
+      label:GetPropertyChangedSignal("Text"):Connect(function()
+        changedHit = changedHit + 1
+      end)
+      label.Text = "<b>Updated</b>"
+      local clonedLabel = label:Clone()
+
+      -- TextBox interactive input
+      local box = Instance.new("TextBox", canvas)
+      box.Name = "CmdInput"
+      box.Position = UDim2.new(0, 10, 0, 70)
+      box.Size = UDim2.new(0, 180, 0, 40)
+      box.PlaceholderText = "Enter cmd"
+      local submittedVal = ""
+      box.FocusLost:Connect(function(enterPressed)
+        if enterPressed then submittedVal = box.Text end
+      end)
+
+      -- Notification + JSON
+      StarterGui:SetCore("SendNotification", { Title = "Alert", Text = "Synced", Duration = 4 })
+      local encoded = HttpService:JSONEncode({ ok = true, score = 7 })
+      local decoded = HttpService:JSONDecode(encoded)
+
+      -- Child LocalScript execution
+      local ls = Instance.new("LocalScript")
+      ls.Source = [[
+        print("LS_OK:" .. script.Parent.ClassName)
+      ]]
+      ls.Parent = canvas
+
+      print("RES", mRes, ok1, r1, ok2, r2, matched, foundIdx, changedHit, clonedLabel.Text, decoded.score)
+      """
+    val proto = compiler.compile(source)
+    vm.execute(proto, env.genv)
+
+    val allPrints = logs.filter { it.first == LogLevel.PRINT }.joinToString("\n") { it.second }
+    assertTrue("Expected child LocalScript print in:\n$allPrints", allPrints.contains("LS_OK:CanvasGroup"))
+    assertTrue("Expected RES 10\ttrue\t11\ttrue\t40\t95\t2\t1\t<b>Updated</b>\t7 in:\n$allPrints",
+      allPrints.contains("RES\t10\ttrue\t11\ttrue\t40\t95\t2\t1\t<b>Updated</b>\t7"))
+    assertEquals(1, env.notifications.size)
+    assertEquals("Alert", env.notifications.first().title)
+
+    val processor = GuiDrawingProcessor()
+    val scene = processor.process(
+      env.uiRoots(),
+      env.drawings,
+      400f,
+      240f,
+      1L,
+      16L,
+      notifications = env.notifications.toList(),
+    )
+    // UIScale=0.5 scales label 200x60 down to 100x30 and RichText strips <b> tags
+    val labelTextCmd = scene.commands.filterIsInstance<GuiDrawCommand.DrawText>().first { it.text == "Updated" }
+    val labelRectCmd = scene.commands.filterIsInstance<GuiDrawCommand.DrawRect>().first { it.instanceId == labelTextCmd.instanceId }
+    assertEquals(100f, labelRectCmd.width, 0.5f)
+    assertEquals(30f, labelRectCmd.height, 0.5f)
+    assertEquals(1, scene.notifications.size)
+
+    val boxTarget = scene.hitTargets.first { it.isTextInput && it.name == "CmdInput" }
+    env.submitTextBoxInput(vm, boxTarget.instanceId, "fly")
+    val sceneAfterInput = processor.process(env.uiRoots(), env.drawings, 400f, 240f, 2L, 16L)
+    assertTrue(sceneAfterInput.commands.filterIsInstance<GuiDrawCommand.DrawText>().any { it.text == "fly" && !it.isPlaceholder })
+    scope.cancel()
+  }
 }

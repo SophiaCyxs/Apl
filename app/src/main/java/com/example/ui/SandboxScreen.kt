@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -35,8 +34,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,6 +45,9 @@ import androidx.compose.ui.unit.sp
 import com.example.data.AppSettings
 import com.example.ui.icons.LucideIcons
 import com.example.ui.theme.LocalBloxPalette
+import com.example.ui.theme.LocalBloxVisuals
+import com.example.ui.theme.MovingGradientText
+import com.example.ui.theme.bloxSurface
 
 private enum class InspectorTab(val label: String) {
   BYTECODE("Bytecode"),
@@ -62,96 +66,102 @@ fun SandboxScreen(
   modifier: Modifier = Modifier,
 ) {
   val palette = LocalBloxPalette.current
+  val visuals = LocalBloxVisuals.current
   val fontFamily = remember(settings.codeFont) { settings.codeFont.toComposeFontFamily() }
   var activeTab by remember { mutableStateOf(InspectorTab.BYTECODE) }
 
   Column(
-    modifier = modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
+    modifier = modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp),
+    verticalArrangement = Arrangement.spacedBy(10.dp),
   ) {
-    // Compact single-line telemetry bar
+    // Modern KPI Telemetry Cards
     Row(
-      modifier =
-        Modifier
-          .fillMaxWidth()
-          .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(4.dp))
-          .border(1.dp, palette.border, RoundedCornerShape(4.dp))
-          .padding(horizontal = 10.dp, vertical = 8.dp),
-      horizontalArrangement = Arrangement.SpaceBetween,
-      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-      Text(
-        text = "OPS ${inspectorState.opsExecuted}",
-        style = MaterialTheme.typography.labelSmall.copy(fontFamily = fontFamily),
-        color = MaterialTheme.colorScheme.onSurface,
+      KpiStatTile(
+        label = "VM OPS",
+        value = formatCompactOps(inspectorState.opsExecuted),
+        icon = LucideIcons.Activity,
+        fontFamily = fontFamily,
+        highlight = isRunning,
+        modifier = Modifier.weight(1f),
       )
-      Text(
-        text = "UI ${inspectorState.uiTree.size}",
-        style = MaterialTheme.typography.labelSmall.copy(fontFamily = fontFamily),
-        color = palette.textMuted,
+      KpiStatTile(
+        label = "UI TREE",
+        value = inspectorState.uiTree.size.toString(),
+        icon = LucideIcons.Layers,
+        fontFamily = fontFamily,
+        modifier = Modifier.weight(1f),
       )
-      Text(
-        text = "DRAW ${inspectorState.drawingCount}",
-        style = MaterialTheme.typography.labelSmall.copy(fontFamily = fontFamily),
-        color = palette.textMuted,
+      KpiStatTile(
+        label = "DRAWING",
+        value = inspectorState.drawingCount.toString(),
+        icon = LucideIcons.Sparkles,
+        fontFamily = fontFamily,
+        modifier = Modifier.weight(1f),
       )
-      Text(
-        text = if (isRunning) "ACTIVE" else "IDLE",
-        style = MaterialTheme.typography.labelSmall.copy(fontFamily = fontFamily),
-        color = if (isRunning) MaterialTheme.colorScheme.primary else palette.textMuted,
+      KpiStatTile(
+        label = "ENGINE",
+        value = if (isRunning) "LIVE" else "IDLE",
+        icon = LucideIcons.Cpu,
+        fontFamily = fontFamily,
+        highlight = isRunning,
+        modifier = Modifier.weight(1f),
       )
     }
 
-    // Inspector Tab Strip
-    Row(
+    // Segmented Pill Inspector Switcher
+    Surface(
+      color = MaterialTheme.colorScheme.surface.copy(alpha = visuals.effectivePanelAlpha() * 0.9f),
+      shape = RoundedCornerShape(14.dp),
+      border = BorderStroke(1.dp, palette.border.copy(alpha = 0.7f)),
       modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-      InspectorTab.entries.forEach { tab ->
-        val selected = tab == activeTab
-        Surface(
-          modifier =
-            Modifier
-              .weight(1f)
-              .heightIn(min = 40.dp)
-              .clip(RoundedCornerShape(4.dp))
-              .clickable { activeTab = tab }
-              .testTag("inspector_tab_${tab.name}"),
-          color =
-            if (selected) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.surface,
-          shape = RoundedCornerShape(4.dp),
-          border =
-            BorderStroke(
-              1.dp,
-              if (selected) MaterialTheme.colorScheme.primary else palette.border,
-            ),
-        ) {
-          Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)) {
-            Text(
-              text = tab.label,
-              style = MaterialTheme.typography.labelMedium,
-              fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-              color =
-                if (selected) MaterialTheme.colorScheme.onPrimary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
+      Row(
+        modifier = Modifier.fillMaxWidth().padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+      ) {
+        InspectorTab.entries.forEach { tab ->
+          val selected = tab == activeTab
+          Surface(
+            modifier =
+              Modifier
+                .weight(1f)
+                .heightIn(min = 42.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .clickable { activeTab = tab }
+                .testTag("inspector_tab_${tab.name}"),
+            color =
+              if (selected) MaterialTheme.colorScheme.primary
+              else MaterialTheme.colorScheme.surface.copy(alpha = 0f),
+            shape = RoundedCornerShape(11.dp),
+          ) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)) {
+              Text(
+                text = tab.label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                color =
+                  if (selected) MaterialTheme.colorScheme.onPrimary
+                  else palette.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
           }
         }
       }
     }
 
-    // Inspector Body
+    // Inspector Body Card
     Box(
       modifier =
         Modifier
           .weight(1f)
           .fillMaxWidth()
-          .background(palette.terminalBg, RoundedCornerShape(4.dp))
-          .border(1.dp, palette.border, RoundedCornerShape(4.dp))
-          .padding(10.dp),
+          .bloxSurface(shape = RoundedCornerShape(16.dp), color = palette.terminalBg)
+          .padding(12.dp),
     ) {
       when (activeTab) {
         InspectorTab.BYTECODE -> {
@@ -188,14 +198,11 @@ fun SandboxScreen(
               )
             }
             CompileStatus.Idle -> {
-              Text(
-                text = "> no bytecode compiled",
-                style =
-                  TextStyle(
-                    fontFamily = fontFamily,
-                    fontSize = settings.terminalFontSizeSp.sp,
-                    color = palette.textMuted,
-                  ),
+              EmptyInspectorHint(
+                icon = LucideIcons.Braces,
+                text = "Compile a Lua 5.1 script to inspect VM instructions",
+                fontFamily = fontFamily,
+                fontSize = settings.terminalFontSizeSp,
               )
             }
           }
@@ -203,26 +210,23 @@ fun SandboxScreen(
 
         InspectorTab.UI_TREE -> {
           if (inspectorState.uiTree.isEmpty()) {
-            Text(
-              text = "> ui tree empty",
-              style =
-                TextStyle(
-                  fontFamily = fontFamily,
-                  fontSize = settings.terminalFontSizeSp.sp,
-                  color = palette.textMuted,
-                ),
+            EmptyInspectorHint(
+              icon = LucideIcons.Layers,
+              text = "Run a GUI script to inspect live ScreenGui / Frame nodes",
+              fontFamily = fontFamily,
+              fontSize = settings.terminalFontSizeSp,
             )
           } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp)) {
               items(inspectorState.uiTree, key = { it.id }) { node ->
                 Row(
                   modifier =
                     Modifier
                       .fillMaxWidth()
                       .padding(start = (node.depth * 14).dp)
-                      .border(1.dp, palette.border, RoundedCornerShape(4.dp))
-                      .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(4.dp))
-                      .padding(horizontal = 8.dp, vertical = 6.dp),
+                      .border(1.dp, palette.border.copy(alpha = 0.75f), RoundedCornerShape(10.dp))
+                      .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(10.dp))
+                      .padding(horizontal = 10.dp, vertical = 8.dp),
                   verticalAlignment = Alignment.CenterVertically,
                   horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -263,25 +267,22 @@ fun SandboxScreen(
 
         InspectorTab.GENV -> {
           if (inspectorState.genvEntries.isEmpty()) {
-            Text(
-              text = "> getgenv() empty",
-              style =
-                TextStyle(
-                  fontFamily = fontFamily,
-                  fontSize = settings.terminalFontSizeSp.sp,
-                  color = palette.textMuted,
-                ),
+            EmptyInspectorHint(
+              icon = LucideIcons.Zap,
+              text = "getgenv() table is empty",
+              fontFamily = fontFamily,
+              fontSize = settings.terminalFontSizeSp,
             )
           } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp)) {
               items(inspectorState.genvEntries) { (k, v) ->
                 Row(
                   modifier =
                     Modifier
                       .fillMaxWidth()
-                      .border(1.dp, palette.border, RoundedCornerShape(4.dp))
-                      .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(4.dp))
-                      .padding(horizontal = 8.dp, vertical = 6.dp),
+                      .border(1.dp, palette.border.copy(alpha = 0.75f), RoundedCornerShape(10.dp))
+                      .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(10.dp))
+                      .padding(horizontal = 10.dp, vertical = 8.dp),
                   horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                   Text(
@@ -314,25 +315,22 @@ fun SandboxScreen(
 
         InspectorTab.VFS -> {
           if (inspectorState.virtualFiles.isEmpty()) {
-            Text(
-              text = "> virtual fs empty",
-              style =
-                TextStyle(
-                  fontFamily = fontFamily,
-                  fontSize = settings.terminalFontSizeSp.sp,
-                  color = palette.textMuted,
-                ),
+            EmptyInspectorHint(
+              icon = LucideIcons.FileCode2,
+              text = "No virtual files written yet (writefile / appendfile)",
+              fontFamily = fontFamily,
+              fontSize = settings.terminalFontSizeSp,
             )
           } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp)) {
               items(inspectorState.virtualFiles, key = { it.first }) { (path, content) ->
                 Row(
                   modifier =
                     Modifier
                       .fillMaxWidth()
-                      .border(1.dp, palette.border, RoundedCornerShape(4.dp))
-                      .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(4.dp))
-                      .padding(horizontal = 8.dp, vertical = 6.dp),
+                      .border(1.dp, palette.border.copy(alpha = 0.75f), RoundedCornerShape(10.dp))
+                      .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(10.dp))
+                      .padding(horizontal = 10.dp, vertical = 8.dp),
                   verticalAlignment = Alignment.CenterVertically,
                 ) {
                   Column(modifier = Modifier.weight(1f)) {
@@ -346,7 +344,6 @@ fun SandboxScreen(
                           color = MaterialTheme.colorScheme.onSurface,
                         ),
                     )
-                    Spacer(Modifier.height(2.dp))
                     Text(
                       text = content,
                       style =
@@ -355,18 +352,18 @@ fun SandboxScreen(
                           fontSize = (settings.terminalFontSizeSp - 1f).coerceAtLeast(9f).sp,
                           color = palette.textMuted,
                         ),
-                      maxLines = 3,
+                      maxLines = 2,
                       overflow = TextOverflow.Ellipsis,
                     )
                   }
                   IconButton(
                     onClick = { onDeleteVirtualFile(path) },
-                    modifier = Modifier.size(48.dp),
+                    modifier = Modifier.size(48.dp).testTag("delete_vfs_$path"),
                   ) {
                     Icon(
                       imageVector = LucideIcons.Trash2,
-                      contentDescription = "Delete virtual file",
-                      tint = palette.textMuted,
+                      contentDescription = "Delete $path",
+                      tint = palette.error,
                       modifier = Modifier.size(16.dp),
                     )
                   }
@@ -379,3 +376,100 @@ fun SandboxScreen(
     }
   }
 }
+
+@Composable
+private fun KpiStatTile(
+  label: String,
+  value: String,
+  icon: ImageVector,
+  fontFamily: FontFamily,
+  modifier: Modifier = Modifier,
+  highlight: Boolean = false,
+) {
+  val palette = LocalBloxPalette.current
+  val visuals = LocalBloxVisuals.current
+  Column(
+    modifier =
+      modifier
+        .bloxSurface(
+          shape = RoundedCornerShape(14.dp),
+          color = MaterialTheme.colorScheme.surface,
+          borderColor = if (highlight) MaterialTheme.colorScheme.primary else palette.border,
+        )
+        .padding(horizontal = 9.dp, vertical = 8.dp),
+    verticalArrangement = Arrangement.spacedBy(2.dp),
+  ) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+      Icon(
+        imageVector = icon,
+        contentDescription = null,
+        tint = if (highlight) MaterialTheme.colorScheme.primary else palette.textMuted,
+        modifier = Modifier.size(11.dp),
+      )
+      Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        color = palette.textMuted,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+    MovingGradientText(
+      text = value,
+      style =
+        TextStyle(
+          fontFamily = fontFamily,
+          fontSize = 13.sp,
+          fontWeight = FontWeight.Bold,
+          color = if (highlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        ),
+      maxLines = 1,
+    )
+  }
+}
+
+@Composable
+private fun EmptyInspectorHint(
+  icon: ImageVector,
+  text: String,
+  fontFamily: FontFamily,
+  fontSize: Float,
+) {
+  val palette = LocalBloxPalette.current
+  Box(
+    modifier = Modifier.fillMaxSize(),
+    contentAlignment = Alignment.Center,
+  ) {
+    Column(
+      horizontalAlignment = Alignment.CenterHorizontally,
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+      modifier = Modifier.padding(16.dp),
+    ) {
+      Icon(
+        imageVector = icon,
+        contentDescription = null,
+        tint = palette.textMuted,
+        modifier = Modifier.size(26.dp),
+      )
+      Text(
+        text = text,
+        style =
+          TextStyle(
+            fontFamily = fontFamily,
+            fontSize = fontSize.sp,
+            color = palette.textMuted,
+          ),
+      )
+    }
+  }
+}
+
+private fun formatCompactOps(ops: Long): String =
+  when {
+    ops >= 1_000_000 -> "${"%.1f".format(ops / 1_000_000.0)}M"
+    ops >= 1_000 -> "${"%.1f".format(ops / 1_000.0)}K"
+    else -> ops.toString()
+  }

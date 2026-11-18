@@ -1,11 +1,59 @@
 package com.example.ui.theme
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
 
 enum class ThemePalette(val label: String) {
   MONOCHROME("Monochrome"),
   PHOSPHOR("Phosphor"),
   COBALT("Cobalt"),
+}
+
+enum class BackgroundMode(val label: String) {
+  GALAXY("Galaxy"),
+  SOLID("Minimal"),
+  CUSTOM_IMAGE("Photo"),
+  CUSTOM_VIDEO("Video MP4"),
+}
+
+enum class SyntaxGradientPreset(val label: String, val colors: List<Color>) {
+  SILVER_MIST(
+    "Silver Mist",
+    listOf(Color(0xFFFFFFFF), Color(0xFFA1A1AA), Color(0xFFE4E4E7), Color(0xFF71717A)),
+  ),
+  COSMIC_NEBULA(
+    "Cosmic",
+    listOf(Color(0xFF38BDF8), Color(0xFFA78BFA), Color(0xFFF472B6), Color(0xFF38BDF8)),
+  ),
+  AURORA(
+    "Aurora",
+    listOf(Color(0xFF34D399), Color(0xFF38BDF8), Color(0xFF818CF8), Color(0xFF34D399)),
+  ),
+  SOLAR_PULSE(
+    "Solar",
+    listOf(Color(0xFFFBBF24), Color(0xFFF87171), Color(0xFFE879F9), Color(0xFFFBBF24)),
+  ),
+  PRISM_CYAN(
+    "Cyan Ice",
+    listOf(Color(0xFF67E8F9), Color(0xFF3B82F6), Color(0xFF22D3EE), Color(0xFFA5F3FC)),
+  ),
+}
+
+fun buildMovingGradientBrush(
+  colors: List<Color>,
+  phase: Float,
+  spanPx: Float = 900f,
+): Brush {
+  val safeColors = if (colors.size >= 2) colors else listOf(Color.White, Color.Gray)
+  val shift = (phase % 1f) * spanPx
+  return Brush.linearGradient(
+    colors = safeColors,
+    start = Offset(shift, shift * 0.35f),
+    end = Offset(shift + spanPx * 0.72f, shift * 0.35f + spanPx * 0.28f),
+    tileMode = TileMode.Mirror,
+  )
 }
 
 // Monochrome Dark (Pure Zinc / Grayscale)
@@ -36,7 +84,28 @@ data class SyntaxColors(
   val comment: Color,
   val operator: Color,
   val defaultText: Color,
-)
+) {
+  fun withOverrides(
+    keywordArgb: Long = 0L,
+    typeArgb: Long = 0L,
+    executorArgb: Long = 0L,
+    builtinArgb: Long = 0L,
+    stringArgb: Long = 0L,
+    numberArgb: Long = 0L,
+    commentArgb: Long = 0L,
+    operatorArgb: Long = 0L,
+  ): SyntaxColors =
+    copy(
+      keyword = if (keywordArgb != 0L) Color(keywordArgb) else keyword,
+      robloxType = if (typeArgb != 0L) Color(typeArgb) else robloxType,
+      executorApi = if (executorArgb != 0L) Color(executorArgb) else executorApi,
+      builtin = if (builtinArgb != 0L) Color(builtinArgb) else builtin,
+      stringLiteral = if (stringArgb != 0L) Color(stringArgb) else stringLiteral,
+      numberLiteral = if (numberArgb != 0L) Color(numberArgb) else numberLiteral,
+      comment = if (commentArgb != 0L) Color(commentArgb) else comment,
+      operator = if (operatorArgb != 0L) Color(operatorArgb) else operator,
+    )
+}
 
 val MonoDarkSyntax =
   SyntaxColors(

@@ -12,11 +12,20 @@ class LuaVm(
   var totalOpsExecuted: Long = 0L
     private set
 
+  var cumulativeOpsExecuted: Long = 0L
+    private set
+
   var hookResolver: (LuaValue) -> LuaValue = { it }
 
   private var opsSinceYield = 0
 
   fun resetOpCounters() {
+    totalOpsExecuted = 0L
+    cumulativeOpsExecuted = 0L
+    opsSinceYield = 0
+  }
+
+  fun resetFrameOps() {
     totalOpsExecuted = 0L
     opsSinceYield = 0
   }
@@ -71,6 +80,7 @@ class LuaVm(
 
     while (pc < code.size) {
       totalOpsExecuted++
+      cumulativeOpsExecuted++
       opsSinceYield++
       if (opsSinceYield >= 4096) {
         opsSinceYield = 0
@@ -451,6 +461,14 @@ class LuaVm(
           callFunction(ts, listOf(v)).firstOrNull()?.toString() ?: ""
         } else {
           throw LuaRuntimeException("Attempt to concatenate a table value")
+        }
+      }
+      is LuaValue.Userdata -> {
+        val ts = v.metatable?.get(LuaValue.Str("__tostring"))
+        if (ts != null && ts !is LuaValue.Nil) {
+          callFunction(ts, listOf(v)).firstOrNull()?.toString() ?: ""
+        } else {
+          v.data.toString()
         }
       }
       else -> throw LuaRuntimeException("Attempt to concatenate a ${v.typeofName()} value")

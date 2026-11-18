@@ -51,10 +51,12 @@ sealed interface GuiDrawCommand {
     val textAlpha: Float,
     val textSize: Float,
     val textScaled: Boolean,
+    val textWrapped: Boolean,
     val xAlign: String,
     val yAlign: String,
     val fontName: String,
     val isBold: Boolean,
+    val isPlaceholder: Boolean = false,
   ) : GuiDrawCommand
 
   data class DrawImageBadge(
@@ -143,6 +145,7 @@ data class GuiHitTarget(
   val isClickable: Boolean,
   val isDraggable: Boolean,
   val isScrollable: Boolean,
+  val isTextInput: Boolean = false,
   val label: String?,
 ) {
   fun contains(px: Float, py: Float): Boolean =
@@ -158,6 +161,7 @@ data class GuiRenderScene(
   val hitTargets: List<GuiHitTarget>,
   val activeGuiCount: Int,
   val diffSummary: String?,
+  val notifications: List<GuiNotification> = emptyList(),
 )
 
 class GuiDrawingProcessor {
@@ -175,6 +179,7 @@ class GuiDrawingProcessor {
     frameNumber: Long,
     deltaMs: Long,
     monochromeGui: Boolean = false,
+    notifications: List<GuiNotification> = emptyList(),
   ): GuiRenderScene {
     val safeW = viewportW.coerceAtLeast(120f)
     val safeH = viewportH.coerceAtLeast(80f)
@@ -186,14 +191,16 @@ class GuiDrawingProcessor {
 
     val screenGuis = mutableListOf<RbxInstance>()
     for (root in roots) {
+      root.liveAbsolutePosition = RbxVector2(0.0, 0.0)
+      root.liveAbsoluteSize = RbxVector2(safeW.toDouble(), safeH.toDouble())
       for (child in root.children.toList()) {
-        if (child.className == "ScreenGui") {
+        if (isLayerCollector(child.className)) {
           val enabled = (child.properties["Enabled"] as? LuaValue.Bool)?.value ?: true
           if (enabled) {
             activeGuis++
             screenGuis.add(child)
           }
-        } else if (isRenderableUi(child.className)) {
+        } else if (isRenderableUi(child.className) || child.className == "Folder") {
           activeGuis++
           screenGuis.add(child)
         }
@@ -220,20 +227,79 @@ class GuiDrawingProcessor {
       return out
     }
 
-    fun processNode(node: RbxInstance, parentRect: RectF, overrideRect: RectF? = null) {
-      if (node.className == "ScreenGui") {
-        val children =
-          node.children.toList()
-            .filter { isRenderableUi(it.className) }
-            .sortedBy { (it.properties["ZIndex"] as? LuaValue.Num)?.value ?: 1.0 }
-        for (c in children) processNode(c, parentRect, null)
+    fun collectRenderableChildren(parent: RbxInstance): List<RbxInstance> {
+      val out = mutableListOf<RbxInstance>()
+      for (c in parent.children.toList()) {
+        if (c.className == "Folder" || c.className == "Configuration") {
+          out.addAll(collectRenderableChildren(c))
+        } else if (isRenderableUi(c.className)) {
+          out.add(c)
+        }
+      }
+      return out.sortedWith(
+        compareBy<RbxInstance>(
+          { (it.properties["ZIndex"] as? LuaValue.Num)?.value ?: 1.0 },
+          { (it.properties["LayoutOrder"] as? LuaValue.Num)?.value ?: 0.0 },
+        )
+      )
+    }
+
+    fun processNode(
+      node: RbxInstance,
+      parentRect: RectF,
+      overrideRect: RectF? = null,
+      inheritedScale: Float = 1f,
+      inheritedAlpha: Float = 1f,
+    ) {
+      if (isLayerCollector(node.className)) {
+        node.liveAbsolutePosition = RbxVector2(parentRect.x.toDouble(), parentRect.y.toDouble())
+        node.liveAbsoluteSize = RbxVector2(parentRect.w.toDouble(), parentRect.h.toDouble())
+        val collectorScale =
+          ((node.children.firstOrNull { it.className == "UIScale" }?.properties?.get("Scale") as? LuaValue.Num)?.value
+            ?: 1.0).toFloat().coerceIn(0.25f, 3f)
+        for (c in collectRenderableChildren(node)) {
+          processNode(c, parentRect, null, inheritedScale * collectorScale, inheritedAlpha)
+        }
         return
       }
       if (!isRenderableUi(node.className)) return
       val visible = (node.properties["Visible"] as? LuaValue.Bool)?.value ?: true
       if (!visible) return
 
-      var rect = overrideRect ?: computeNodeRect(node, parentRect)
+      val localScale =
+        ((node.children.firstOrNull { it.className == "UIScale" }?.properties?.get("Scale") as? LuaValue.Num)?.value
+          ?: 1.0).toFloat().coerceIn(0.25f, 3f)
+      val scale = inheritedScale * localScale
+
+      var rect = overrideRect ?: computeNodeRect(node, parentRect, scale)
+
+      // AutomaticSize for containers / text labels when Size axis is 0
+      val autoSizeMode =
+        ((node.properties["AutomaticSize"] as? LuaValue.Userdata)?.data as? RbxEnumItem)?.name ?: "None"
+      if (autoSizeMode != "None" && overrideRect == null) {
+        val estimated = estimateAutoSize(node, rect, scale)
+        rect =
+          when (autoSizeMode) {
+            "X" -> rect.copy(w = max(rect.w, estimated.first))
+            "Y" -> rect.copy(h = max(rect.h, estimated.second))
+            "XY" -> rect.copy(w = max(rect.w, estimated.first), h = max(rect.h, estimated.second))
+            else -> rect
+          }
+      }
+
+      // UISizeConstraint
+      val sizeConstraint = node.children.firstOrNull { it.className == "UISizeConstraint" }
+      if (sizeConstraint != null) {
+        val minSz = (sizeConstraint.properties["MinSize"] as? LuaValue.Userdata)?.data as? RbxVector2
+        val maxSz = (sizeConstraint.properties["MaxSize"] as? LuaValue.Userdata)?.data as? RbxVector2
+        val minW = (minSz?.x ?: 0.0).toFloat() * scale
+        val minH = (minSz?.y ?: 0.0).toFloat() * scale
+        val maxW = (maxSz?.x ?: 10000.0).toFloat().coerceAtLeast(minW) * scale
+        val maxH = (maxSz?.y ?: 10000.0).toFloat().coerceAtLeast(minH) * scale
+        rect = rect.copy(w = rect.w.coerceIn(minW, maxW), h = rect.h.coerceIn(minH, maxH))
+      }
+
+      // UIAspectRatioConstraint
       val aspect = node.children.firstOrNull { it.className == "UIAspectRatioConstraint" }
       if (aspect != null) {
         val ratio = ((aspect.properties["AspectRatio"] as? LuaValue.Num)?.value ?: 1.0).toFloat()
@@ -253,6 +319,20 @@ class GuiDrawingProcessor {
       }
       if (rect.w <= 0.5f || rect.h <= 0.5f) return
 
+      // Write back live layout telemetry to RbxInstance for library scripts reading AbsolutePosition/Size!
+      node.liveAbsolutePosition = RbxVector2(rect.x.toDouble(), rect.y.toDouble())
+      node.liveAbsoluteSize = RbxVector2(rect.w.toDouble(), rect.h.toDouble())
+
+      val groupAlpha =
+        if (node.className == "CanvasGroup") {
+          val gt = ((node.properties["GroupTransparency"] as? LuaValue.Num)?.value ?: 0.0).toFloat()
+            .coerceIn(0f, 1f)
+          (inheritedAlpha * (1f - gt)).coerceIn(0f, 1f)
+        } else {
+          inheritedAlpha
+        }
+      if (groupAlpha <= 0.005f) return
+
       val rotation = ((node.properties["Rotation"] as? LuaValue.Num)?.value ?: 0.0).toFloat()
       val hasRotation = abs(rotation) > 0.01f
       if (hasRotation) {
@@ -265,18 +345,25 @@ class GuiDrawingProcessor {
         if (cornerNode != null) {
           val udim = (cornerNode.properties["CornerRadius"] as? LuaValue.Userdata)?.data as? RbxUDim
             ?: RbxUDim(0.0, 8.0)
-          val raw = (udim.scale * min(rect.w, rect.h) + udim.offset).toFloat()
+          val raw = (udim.scale * min(rect.w, rect.h) + udim.offset * scale).toFloat()
           raw.coerceIn(0f, min(rect.w, rect.h) * 0.5f)
         } else {
           0f
         }
 
-      // Background + UIGradient
-      val bgColor = (node.properties["BackgroundColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
+      // Background + UIGradient + CanvasGroup tint
+      val rawBgColor = (node.properties["BackgroundColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
         ?: RbxColor3(0.12, 0.14, 0.18)
+      val groupTint =
+        if (node.className == "CanvasGroup") {
+          (node.properties["GroupColor3"] as? LuaValue.Userdata)?.data as? RbxColor3 ?: RbxColor3(1.0, 1.0, 1.0)
+        } else {
+          RbxColor3(1.0, 1.0, 1.0)
+        }
+      val bgColor = RbxColor3(rawBgColor.r * groupTint.r, rawBgColor.g * groupTint.g, rawBgColor.b * groupTint.b)
       val bgTrans = ((node.properties["BackgroundTransparency"] as? LuaValue.Num)?.value ?: 0.0).toFloat()
         .coerceIn(0f, 1f)
-      val bgAlpha = (1f - bgTrans).coerceIn(0f, 1f)
+      val bgAlpha = ((1f - bgTrans) * groupAlpha).coerceIn(0f, 1f)
       val bgArgb = maybeGray(bgColor.toArgbLong(), monochromeGui)
 
       val gradNode = node.children.firstOrNull { it.className == "UIGradient" }
@@ -302,26 +389,27 @@ class GuiDrawingProcessor {
 
       // UIStroke or BorderSizePixel
       val strokeNode = node.children.firstOrNull { it.className == "UIStroke" }
+      val strokeNodeEnabled = (strokeNode?.properties?.get("Enabled") as? LuaValue.Bool)?.value ?: true
       val borderPx = ((node.properties["BorderSizePixel"] as? LuaValue.Num)?.value ?: 1.0).toFloat()
       val strokeColor: RbxColor3
       val strokeThickness: Float
       val strokeAlpha: Float
-      if (strokeNode != null) {
+      if (strokeNode != null && strokeNodeEnabled) {
         strokeColor =
           (strokeNode.properties["Color"] as? LuaValue.Userdata)?.data as? RbxColor3
             ?: RbxColor3(0.85, 0.85, 0.9)
         strokeThickness =
           ((strokeNode.properties["Thickness"] as? LuaValue.Num)?.value ?: 1.5).toFloat()
-            .coerceIn(0f, 12f)
+            .coerceIn(0f, 12f) * scale
         val stTrans =
           ((strokeNode.properties["Transparency"] as? LuaValue.Num)?.value ?: 0.0).toFloat()
             .coerceIn(0f, 1f)
-        strokeAlpha = (1f - stTrans).coerceIn(0f, 1f)
-      } else if (borderPx > 0f) {
+        strokeAlpha = ((1f - stTrans) * groupAlpha).coerceIn(0f, 1f)
+      } else if (borderPx > 0f && strokeNode == null) {
         strokeColor =
           (node.properties["BorderColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
             ?: RbxColor3(0.24, 0.28, 0.35)
-        strokeThickness = borderPx.coerceIn(0f, 6f)
+        strokeThickness = borderPx.coerceIn(0f, 6f) * scale
         strokeAlpha = bgAlpha
       } else {
         strokeColor = RbxColor3(0.0, 0.0, 0.0)
@@ -349,16 +437,21 @@ class GuiDrawingProcessor {
 
       // Hit target registration (before children so children sit on top)
       val isButton = node.className == "TextButton" || node.className == "ImageButton"
+      val isTextBox = node.className == "TextBox"
       val isScroll = node.className == "ScrollingFrame"
       val isDraggable = (node.properties["Draggable"] as? LuaValue.Bool)?.value == true
-      val isActive = (node.properties["Active"] as? LuaValue.Bool)?.value ?: isButton
+      val isActive = (node.properties["Active"] as? LuaValue.Bool)?.value ?: (isButton || isTextBox)
       val hasClickSignal =
-        node.mouseButton1Click.connections.isNotEmpty() ||
-          node.mouseButton1Down.connections.isNotEmpty() ||
-          node.mouseButton1Up.connections.isNotEmpty() ||
-          node.activated.connections.isNotEmpty()
-      val labelText = (node.properties["Text"] as? LuaValue.Str)?.value
-      if (isButton || isScroll || isDraggable || isActive || hasClickSignal) {
+        node.mouseButton1Click.hasListeners() ||
+          node.mouseButton1Down.hasListeners() ||
+          node.mouseButton1Up.hasListeners() ||
+          node.activated.hasListeners() ||
+          node.inputBegan.hasListeners()
+      val rawLabelText = (node.properties["Text"] as? LuaValue.Str)?.value
+      val richText = (node.properties["RichText"] as? LuaValue.Bool)?.value == true
+      val displayLabelText = rawLabelText?.let { if (richText) stripRichText(it) else it }
+
+      if (isButton || isTextBox || isScroll || isDraggable || isActive || hasClickSignal) {
         val clippedHit = currentClippedRect(rect)
         if (clippedHit.w > 1f && clippedHit.h > 1f) {
           hitTargets.add(
@@ -370,10 +463,11 @@ class GuiDrawingProcessor {
               y = clippedHit.y,
               width = clippedHit.w,
               height = clippedHit.h,
-              isClickable = isButton || hasClickSignal,
+              isClickable = isButton || isTextBox || hasClickSignal,
               isDraggable = isDraggable,
               isScrollable = isScroll,
-              label = labelText,
+              isTextInput = isTextBox,
+              label = displayLabelText,
             )
           )
         }
@@ -381,10 +475,10 @@ class GuiDrawingProcessor {
 
       // Compute padded content box for text & children
       val paddingNode = node.children.firstOrNull { it.className == "UIPadding" }
-      val padTop = evalUDim(paddingNode?.properties?.get("PaddingTop"), rect.h)
-      val padBottom = evalUDim(paddingNode?.properties?.get("PaddingBottom"), rect.h)
-      val padLeft = evalUDim(paddingNode?.properties?.get("PaddingLeft"), rect.w)
-      val padRight = evalUDim(paddingNode?.properties?.get("PaddingRight"), rect.w)
+      val padTop = evalUDim(paddingNode?.properties?.get("PaddingTop"), rect.h, scale)
+      val padBottom = evalUDim(paddingNode?.properties?.get("PaddingBottom"), rect.h, scale)
+      val padLeft = evalUDim(paddingNode?.properties?.get("PaddingLeft"), rect.w, scale)
+      val padRight = evalUDim(paddingNode?.properties?.get("PaddingRight"), rect.w, scale)
       val contentRect = RectF(
         rect.x + padLeft,
         rect.y + padTop,
@@ -392,18 +486,29 @@ class GuiDrawingProcessor {
         (rect.h - padTop - padBottom).coerceAtLeast(1f),
       )
 
-      // Text or Image content
-      if (node.className == "TextLabel" || node.className == "TextButton" || node.className == "TextBox") {
-        val text = labelText ?: ""
-        if (text.isNotEmpty()) {
+      // Text, TextBox placeholder, or Image content
+      if (node.className == "TextLabel" || node.className == "TextButton" || isTextBox) {
+        val placeholder = (node.properties["PlaceholderText"] as? LuaValue.Str)?.value ?: ""
+        val showPlaceholder = isTextBox && (displayLabelText.isNullOrEmpty()) && placeholder.isNotEmpty()
+        val textToDraw = if (showPlaceholder) placeholder else (displayLabelText ?: "")
+        if (textToDraw.isNotEmpty()) {
           val textColor =
-            (node.properties["TextColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
-              ?: RbxColor3(0.95, 0.96, 0.98)
+            if (showPlaceholder) {
+              (node.properties["PlaceholderColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
+                ?: RbxColor3(0.55, 0.58, 0.65)
+            } else {
+              (node.properties["TextColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
+                ?: RbxColor3(0.95, 0.96, 0.98)
+            }
           val textTrans = ((node.properties["TextTransparency"] as? LuaValue.Num)?.value ?: 0.0).toFloat()
             .coerceIn(0f, 1f)
-          val textSize = ((node.properties["TextSize"] as? LuaValue.Num)?.value ?: 14.0).toFloat()
-            .coerceIn(7f, 48f)
+          val textSizeConstraint = node.children.firstOrNull { it.className == "UITextSizeConstraint" }
+          val minTs = ((textSizeConstraint?.properties?.get("MinTextSize") as? LuaValue.Num)?.value ?: 6.0).toFloat()
+          val maxTs = ((textSizeConstraint?.properties?.get("MaxTextSize") as? LuaValue.Num)?.value ?: 64.0).toFloat()
+          val rawTextSize = ((node.properties["TextSize"] as? LuaValue.Num)?.value ?: 14.0).toFloat() * scale
+          val textSize = rawTextSize.coerceIn(minTs, max(minTs, maxTs))
           val textScaled = (node.properties["TextScaled"] as? LuaValue.Bool)?.value ?: false
+          val textWrapped = (node.properties["TextWrapped"] as? LuaValue.Bool)?.value ?: false
           val xAlign =
             ((node.properties["TextXAlignment"] as? LuaValue.Userdata)?.data as? RbxEnumItem)?.name
               ?: "Center"
@@ -419,20 +524,22 @@ class GuiDrawingProcessor {
               y = contentRect.y + 2f,
               width = (contentRect.w - 8f).coerceAtLeast(4f),
               height = (contentRect.h - 4f).coerceAtLeast(4f),
-              text = text,
+              text = textToDraw,
               textArgb = maybeGray(textColor.toArgbLong(), monochromeGui),
-              textAlpha = (1f - textTrans).coerceIn(0f, 1f),
+              textAlpha = ((1f - textTrans) * groupAlpha).coerceIn(0f, 1f),
               textSize = textSize,
               textScaled = textScaled,
+              textWrapped = textWrapped,
               xAlign = xAlign,
               yAlign = yAlign,
               fontName = fontName,
               isBold = isButton || fontName.contains("Bold", ignoreCase = true),
+              isPlaceholder = showPlaceholder,
             )
           )
         }
-      } else if (node.className == "ImageLabel" || node.className == "ImageButton") {
-        val imageId = (node.properties["Image"] as? LuaValue.Str)?.value ?: ""
+      } else if (node.className == "ImageLabel" || node.className == "ImageButton" || node.className == "ViewportFrame") {
+        val imageId = (node.properties["Image"] as? LuaValue.Str)?.value ?: node.className
         val imgColor =
           (node.properties["ImageColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
             ?: RbxColor3(1.0, 1.0, 1.0)
@@ -447,18 +554,18 @@ class GuiDrawingProcessor {
             height = contentRect.h,
             imageId = imageId,
             tintArgb = maybeGray(imgColor.toArgbLong(), monochromeGui),
-            alpha = (1f - imgTrans).coerceIn(0f, 1f),
+            alpha = ((1f - imgTrans) * groupAlpha).coerceIn(0f, 1f),
           )
         )
       }
 
       // Signature for frame diff logs
       val sig =
-        "${node.className}:${node.name}|${rect.x.roundToInt()},${rect.y.roundToInt()},${rect.w.roundToInt()},${rect.h.roundToInt()}|${bgColor.rgbLabel()}|${labelText.orEmpty()}|$cornerRadius|$strokeThickness"
+        "${node.className}:${node.name}|${rect.x.roundToInt()},${rect.y.roundToInt()},${rect.w.roundToInt()},${rect.h.roundToInt()}|${bgColor.rgbLabel()}|${displayLabelText.orEmpty()}|$cornerRadius|$strokeThickness"
       currentSignatures[node.id] = sig
       if (lastSignatures[node.id] != sig) {
         val desc =
-          if (labelText != null) "${node.name}(\"${labelText.take(16)}\")"
+          if (!displayLabelText.isNullOrEmpty()) "${node.name}(\"${displayLabelText.take(16)}\")"
           else "${node.name}(${rect.w.roundToInt()}x${rect.h.roundToInt()})"
         changedNames.add(desc)
       }
@@ -470,25 +577,31 @@ class GuiDrawingProcessor {
         commands.add(GuiDrawCommand.PushClip(rect.x, rect.y, rect.w, rect.h, cornerRadius))
       }
 
-      val renderChildren =
-        node.children.toList()
-          .filter { isRenderableUi(it.className) }
-          .sortedWith(
-            compareBy<RbxInstance>(
-              { (it.properties["ZIndex"] as? LuaValue.Num)?.value ?: 1.0 },
-              { (it.properties["LayoutOrder"] as? LuaValue.Num)?.value ?: 0.0 },
-            )
-          )
+      val renderChildren = collectRenderableChildren(node)
+      val listLayout = node.children.firstOrNull { it.className == "UIListLayout" }
+      val gridLayout = node.children.firstOrNull { it.className == "UIGridLayout" }
+      val pageLayout = node.children.firstOrNull { it.className == "UIPageLayout" }
+      val tableLayout = node.children.firstOrNull { it.className == "UITableLayout" }
 
-      // ScrollingFrame canvas offset + virtual canvas rect
+      // ScrollingFrame canvas offset + AutomaticCanvasSize calculation
       val scrollOffset: Pair<Float, Float>
       val layoutArea: RectF
       if (isScroll) {
         val canvasSize =
           (node.properties["CanvasSize"] as? LuaValue.Userdata)?.data as? RbxUDim2
             ?: RbxUDim2(0.0, 0.0, 2.0, 0.0)
-        val canvasW = max(contentRect.w, (canvasSize.xScale * contentRect.w + canvasSize.xOffset).toFloat())
-        val canvasH = max(contentRect.h, (canvasSize.yScale * contentRect.h + canvasSize.yOffset).toFloat())
+        val autoCanvas =
+          ((node.properties["AutomaticCanvasSize"] as? LuaValue.Userdata)?.data as? RbxEnumItem)?.name
+            ?: "None"
+        var canvasW = max(contentRect.w, (canvasSize.xScale * contentRect.w + canvasSize.xOffset * scale).toFloat())
+        var canvasH = max(contentRect.h, (canvasSize.yScale * contentRect.h + canvasSize.yOffset * scale).toFloat())
+
+        if (autoCanvas != "None") {
+          val estContent = estimateLayoutContentSize(renderChildren, contentRect, listLayout, gridLayout, scale)
+          if (autoCanvas == "X" || autoCanvas == "XY") canvasW = max(canvasW, estContent.first + padLeft + padRight)
+          if (autoCanvas == "Y" || autoCanvas == "XY") canvasH = max(canvasH, estContent.second + padTop + padBottom)
+        }
+
         val maxScrollX = (canvasW - contentRect.w).coerceAtLeast(0f)
         val maxScrollY = (canvasH - contentRect.h).coerceAtLeast(0f)
         val curPos =
@@ -503,9 +616,6 @@ class GuiDrawingProcessor {
         layoutArea = contentRect
       }
 
-      val listLayout = node.children.firstOrNull { it.className == "UIListLayout" }
-      val gridLayout = node.children.firstOrNull { it.className == "UIGridLayout" }
-
       if (gridLayout != null) {
         val cellSize =
           (gridLayout.properties["CellSize"] as? LuaValue.Userdata)?.data as? RbxUDim2
@@ -513,13 +623,15 @@ class GuiDrawingProcessor {
         val cellPad =
           (gridLayout.properties["CellPadding"] as? LuaValue.Userdata)?.data as? RbxUDim2
             ?: RbxUDim2(0.0, 6.0, 0.0, 6.0)
-        val cw = (cellSize.xScale * layoutArea.w + cellSize.xOffset).toFloat().coerceAtLeast(16f)
-        val ch = (cellSize.yScale * layoutArea.h + cellSize.yOffset).toFloat().coerceAtLeast(16f)
-        val gapX = (cellPad.xScale * layoutArea.w + cellPad.xOffset).toFloat().coerceAtLeast(0f)
-        val gapY = (cellPad.yScale * layoutArea.h + cellPad.yOffset).toFloat().coerceAtLeast(0f)
+        val cw = (cellSize.xScale * layoutArea.w + cellSize.xOffset * scale).toFloat().coerceAtLeast(16f)
+        val ch = (cellSize.yScale * layoutArea.h + cellSize.yOffset * scale).toFloat().coerceAtLeast(16f)
+        val gapX = (cellPad.xScale * layoutArea.w + cellPad.xOffset * scale).toFloat().coerceAtLeast(0f)
+        val gapY = (cellPad.yScale * layoutArea.h + cellPad.yOffset * scale).toFloat().coerceAtLeast(0f)
 
         var cx = layoutArea.x
         var cy = layoutArea.y
+        var maxUsedW = 0f
+        var maxUsedH = 0f
         for (child in renderChildren) {
           val vis = (child.properties["Visible"] as? LuaValue.Bool)?.value ?: true
           if (!vis) continue
@@ -527,52 +639,81 @@ class GuiDrawingProcessor {
             cx = layoutArea.x
             cy += ch + gapY
           }
-          processNode(child, layoutArea, RectF(cx, cy, cw, ch))
+          processNode(child, layoutArea, RectF(cx, cy, cw, ch), scale, groupAlpha)
+          maxUsedW = max(maxUsedW, (cx - layoutArea.x) + cw)
+          maxUsedH = max(maxUsedH, (cy - layoutArea.y) + ch)
           cx += cw + gapX
         }
-      } else if (listLayout != null) {
+        gridLayout.liveAbsoluteContentSize = RbxVector2(maxUsedW.toDouble(), maxUsedH.toDouble())
+      } else if (listLayout != null || tableLayout != null) {
+        val layoutObj = listLayout ?: tableLayout!!
         val dir =
-          ((listLayout.properties["FillDirection"] as? LuaValue.Userdata)?.data as? RbxEnumItem)?.name
+          ((layoutObj.properties["FillDirection"] as? LuaValue.Userdata)?.data as? RbxEnumItem)?.name
             ?: "Vertical"
         val hAlign =
-          ((listLayout.properties["HorizontalAlignment"] as? LuaValue.Userdata)?.data as? RbxEnumItem)
+          ((layoutObj.properties["HorizontalAlignment"] as? LuaValue.Userdata)?.data as? RbxEnumItem)
             ?.name ?: "Left"
         val vAlign =
-          ((listLayout.properties["VerticalAlignment"] as? LuaValue.Userdata)?.data as? RbxEnumItem)
+          ((layoutObj.properties["VerticalAlignment"] as? LuaValue.Userdata)?.data as? RbxEnumItem)
             ?.name ?: "Top"
+        val wraps = (layoutObj.properties["Wraps"] as? LuaValue.Bool)?.value == true
         val padUdim =
-          (listLayout.properties["Padding"] as? LuaValue.Userdata)?.data as? RbxUDim
+          (layoutObj.properties["Padding"] as? LuaValue.Userdata)?.data as? RbxUDim
             ?: RbxUDim(0.0, 4.0)
         val gap =
-          (padUdim.scale * (if (dir == "Horizontal") layoutArea.w else layoutArea.h) + padUdim.offset)
+          (padUdim.scale * (if (dir == "Horizontal") layoutArea.w else layoutArea.h) + padUdim.offset * scale)
             .toFloat()
             .coerceAtLeast(0f)
 
         val visibleChildren =
           renderChildren.filter { (it.properties["Visible"] as? LuaValue.Bool)?.value ?: true }
-        val sizes = visibleChildren.map { computeNodeSize(it, layoutArea) }
+        val sizes = visibleChildren.map { computeNodeSize(it, layoutArea, scale) }
 
         if (dir == "Horizontal") {
-          val totalW = sizes.sumOf { it.first.toDouble() }.toFloat() + gap * max(0, sizes.size - 1)
-          var cx =
-            when (hAlign) {
-              "Center" -> layoutArea.x + (layoutArea.w - totalW) * 0.5f
-              "Right" -> layoutArea.x + (layoutArea.w - totalW)
-              else -> layoutArea.x
-            }
-          visibleChildren.forEachIndexed { idx, child ->
-            val (cw, ch) = sizes[idx]
-            val cy =
-              when (vAlign) {
-                "Center" -> layoutArea.y + (layoutArea.h - ch) * 0.5f
-                "Bottom" -> layoutArea.y + (layoutArea.h - ch)
-                else -> layoutArea.y
+          if (wraps) {
+            var cx = layoutArea.x
+            var cy = layoutArea.y
+            var rowH = 0f
+            var maxW = 0f
+            visibleChildren.forEachIndexed { idx, child ->
+              val (cw, ch) = sizes[idx]
+              if (cx + cw > layoutArea.x + layoutArea.w + 0.5f && cx > layoutArea.x) {
+                cx = layoutArea.x
+                cy += rowH + gap
+                rowH = 0f
               }
-            processNode(child, layoutArea, RectF(cx, cy, cw, ch))
-            cx += cw + gap
+              processNode(child, layoutArea, RectF(cx, cy, cw, ch), scale, groupAlpha)
+              rowH = max(rowH, ch)
+              maxW = max(maxW, (cx - layoutArea.x) + cw)
+              cx += cw + gap
+            }
+            layoutObj.liveAbsoluteContentSize = RbxVector2(maxW.toDouble(), ((cy - layoutArea.y) + rowH).toDouble())
+          } else {
+            val totalW = sizes.sumOf { it.first.toDouble() }.toFloat() + gap * max(0, sizes.size - 1)
+            val maxH = sizes.maxOfOrNull { it.second } ?: 0f
+            layoutObj.liveAbsoluteContentSize = RbxVector2(totalW.toDouble(), maxH.toDouble())
+            var cx =
+              when (hAlign) {
+                "Center" -> layoutArea.x + (layoutArea.w - totalW) * 0.5f
+                "Right" -> layoutArea.x + (layoutArea.w - totalW)
+                else -> layoutArea.x
+              }
+            visibleChildren.forEachIndexed { idx, child ->
+              val (cw, ch) = sizes[idx]
+              val cy =
+                when (vAlign) {
+                  "Center" -> layoutArea.y + (layoutArea.h - ch) * 0.5f
+                  "Bottom" -> layoutArea.y + (layoutArea.h - ch)
+                  else -> layoutArea.y
+                }
+              processNode(child, layoutArea, RectF(cx, cy, cw, ch), scale, groupAlpha)
+              cx += cw + gap
+            }
           }
         } else {
           val totalH = sizes.sumOf { it.second.toDouble() }.toFloat() + gap * max(0, sizes.size - 1)
+          val maxW = sizes.maxOfOrNull { it.first } ?: 0f
+          layoutObj.liveAbsoluteContentSize = RbxVector2(maxW.toDouble(), totalH.toDouble())
           var cy =
             when (vAlign) {
               "Center" -> layoutArea.y + (layoutArea.h - totalH) * 0.5f
@@ -587,13 +728,20 @@ class GuiDrawingProcessor {
                 "Right" -> layoutArea.x + (layoutArea.w - cw)
                 else -> layoutArea.x
               }
-            processNode(child, layoutArea, RectF(cx, cy, cw, ch))
+            processNode(child, layoutArea, RectF(cx, cy, cw, ch), scale, groupAlpha)
             cy += ch + gap
           }
         }
+      } else if (pageLayout != null) {
+        val visibleChildren =
+          renderChildren.filter { (it.properties["Visible"] as? LuaValue.Bool)?.value ?: true }
+        val firstPage = visibleChildren.firstOrNull()
+        if (firstPage != null) {
+          processNode(firstPage, layoutArea, layoutArea, scale, groupAlpha)
+        }
       } else {
         for (child in renderChildren) {
-          processNode(child, layoutArea, null)
+          processNode(child, layoutArea, null, scale, groupAlpha)
         }
       }
 
@@ -601,7 +749,7 @@ class GuiDrawingProcessor {
       if (isScroll && layoutArea.h > contentRect.h + 1f) {
         val barThick =
           ((node.properties["ScrollBarThickness"] as? LuaValue.Num)?.value ?: 6.0).toFloat()
-            .coerceIn(2f, 12f)
+            .coerceIn(2f, 12f) * scale
         val barColor =
           (node.properties["ScrollBarImageColor3"] as? LuaValue.Userdata)?.data as? RbxColor3
             ?: RbxColor3(0.7, 0.7, 0.75)
@@ -633,7 +781,13 @@ class GuiDrawingProcessor {
     }
 
     for (gui in sortedGuis) {
-      processNode(gui, rootRect, null)
+      if (gui.className == "Folder") {
+        for (child in collectRenderableChildren(gui)) {
+          processNode(child, rootRect, null)
+        }
+      } else {
+        processNode(gui, rootRect, null)
+      }
     }
 
     // Executor Drawing.* primitives sorted by ZIndex
@@ -750,19 +904,84 @@ class GuiDrawingProcessor {
       hitTargets = hitTargets,
       activeGuiCount = activeGuis,
       diffSummary = diffSummary,
+      notifications = notifications,
     )
   }
 
-  private fun evalUDim(v: LuaValue?, refSize: Float): Float {
+  private fun stripRichText(raw: String): String =
+    raw.replace(Regex("<[^>]+>"), "")
+
+  private fun evalUDim(v: LuaValue?, refSize: Float, scale: Float = 1f): Float {
     val u = (v as? LuaValue.Userdata)?.data as? RbxUDim ?: return 0f
-    return (u.scale * refSize + u.offset).toFloat()
+    return (u.scale * refSize + u.offset * scale).toFloat()
   }
+
+  private fun estimateAutoSize(node: RbxInstance, rect: RectF, scale: Float): Pair<Float, Float> {
+    val listLayout = node.children.firstOrNull { it.className == "UIListLayout" }
+    val gridLayout = node.children.firstOrNull { it.className == "UIGridLayout" }
+    if (listLayout != null || gridLayout != null) {
+      val renderChildren = node.children.toList().filter { isRenderableUi(it.className) }
+      return estimateLayoutContentSize(renderChildren, rect, listLayout, gridLayout, scale)
+    }
+    val txt = (node.properties["Text"] as? LuaValue.Str)?.value
+    if (!txt.isNullOrEmpty()) {
+      val ts = ((node.properties["TextSize"] as? LuaValue.Num)?.value ?: 14.0).toFloat() * scale
+      return max(rect.w, txt.length * ts * 0.6f + 16f) to max(rect.h, ts * 1.6f + 8f)
+    }
+    return rect.w to rect.h
+  }
+
+  private fun estimateLayoutContentSize(
+    children: List<RbxInstance>,
+    area: RectF,
+    listLayout: RbxInstance?,
+    gridLayout: RbxInstance?,
+    scale: Float,
+  ): Pair<Float, Float> {
+    val vis = children.filter { (it.properties["Visible"] as? LuaValue.Bool)?.value ?: true }
+    if (vis.isEmpty()) return 0f to 0f
+    if (gridLayout != null) {
+      val cellSize = (gridLayout.properties["CellSize"] as? LuaValue.Userdata)?.data as? RbxUDim2
+        ?: RbxUDim2(0.0, 90.0, 0.0, 44.0)
+      val cellPad = (gridLayout.properties["CellPadding"] as? LuaValue.Userdata)?.data as? RbxUDim2
+        ?: RbxUDim2(0.0, 6.0, 0.0, 6.0)
+      val cw = (cellSize.xScale * area.w + cellSize.xOffset * scale).toFloat().coerceAtLeast(16f)
+      val ch = (cellSize.yScale * area.h + cellSize.yOffset * scale).toFloat().coerceAtLeast(16f)
+      val gx = (cellPad.xScale * area.w + cellPad.xOffset * scale).toFloat().coerceAtLeast(0f)
+      val gy = (cellPad.yScale * area.h + cellPad.yOffset * scale).toFloat().coerceAtLeast(0f)
+      val cols = max(1, ((area.w + gx) / (cw + gx)).toInt())
+      val rows = (vis.size + cols - 1) / cols
+      return (min(vis.size, cols) * (cw + gx) - gx).coerceAtLeast(cw) to (rows * (ch + gy) - gy).coerceAtLeast(ch)
+    }
+    val dir =
+      ((listLayout?.properties?.get("FillDirection") as? LuaValue.Userdata)?.data as? RbxEnumItem)?.name
+        ?: "Vertical"
+    val padUdim = (listLayout?.properties?.get("Padding") as? LuaValue.Userdata)?.data as? RbxUDim
+      ?: RbxUDim(0.0, 4.0)
+    val gap = (padUdim.scale * (if (dir == "Horizontal") area.w else area.h) + padUdim.offset * scale)
+      .toFloat().coerceAtLeast(0f)
+    val sizes = vis.map { computeNodeSize(it, area, scale) }
+    return if (dir == "Horizontal") {
+      (sizes.sumOf { it.first.toDouble() }.toFloat() + gap * max(0, sizes.size - 1)) to
+        (sizes.maxOfOrNull { it.second } ?: 0f)
+    } else {
+      (sizes.maxOfOrNull { it.first } ?: 0f) to
+        (sizes.sumOf { it.second.toDouble() }.toFloat() + gap * max(0, sizes.size - 1))
+    }
+  }
+
+  private fun isLayerCollector(className: String): Boolean =
+    className == "ScreenGui" || className == "BillboardGui" || className == "SurfaceGui"
 
   private fun isRenderableUi(className: String): Boolean =
     className in setOf(
       "ScreenGui",
+      "BillboardGui",
+      "SurfaceGui",
       "Frame",
       "ScrollingFrame",
+      "CanvasGroup",
+      "ViewportFrame",
       "TextLabel",
       "TextButton",
       "ImageLabel",
@@ -772,20 +991,20 @@ class GuiDrawingProcessor {
 
   private data class RectF(val x: Float, val y: Float, val w: Float, val h: Float)
 
-  private fun computeNodeSize(node: RbxInstance, parent: RectF): Pair<Float, Float> {
+  private fun computeNodeSize(node: RbxInstance, parent: RectF, scale: Float = 1f): Pair<Float, Float> {
     val size = (node.properties["Size"] as? LuaValue.Userdata)?.data as? RbxUDim2
       ?: RbxUDim2(0.4, 0.0, 0.25, 0.0)
-    val w = (size.xScale * parent.w + size.xOffset).toFloat().coerceAtLeast(1f)
-    val h = (size.yScale * parent.h + size.yOffset).toFloat().coerceAtLeast(1f)
+    val w = (size.xScale * parent.w + size.xOffset * scale).toFloat().coerceAtLeast(1f)
+    val h = (size.yScale * parent.h + size.yOffset * scale).toFloat().coerceAtLeast(1f)
     return w to h
   }
 
-  private fun computeNodeRect(node: RbxInstance, parent: RectF): RectF {
+  private fun computeNodeRect(node: RbxInstance, parent: RectF, scale: Float = 1f): RectF {
     val pos = (node.properties["Position"] as? LuaValue.Userdata)?.data as? RbxUDim2 ?: RbxUDim2()
     val anchor = (node.properties["AnchorPoint"] as? LuaValue.Userdata)?.data as? RbxVector2 ?: RbxVector2()
-    val (w, h) = computeNodeSize(node, parent)
-    val rawX = parent.x + (pos.xScale * parent.w + pos.xOffset).toFloat() - (anchor.x.toFloat() * w)
-    val rawY = parent.y + (pos.yScale * parent.h + pos.yOffset).toFloat() - (anchor.y.toFloat() * h)
+    val (w, h) = computeNodeSize(node, parent, scale)
+    val rawX = parent.x + (pos.xScale * parent.w + pos.xOffset * scale).toFloat() - (anchor.x.toFloat() * w)
+    val rawY = parent.y + (pos.yScale * parent.h + pos.yOffset * scale).toFloat() - (anchor.y.toFloat() * h)
     return RectF(rawX, rawY, w, h)
   }
 

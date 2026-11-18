@@ -96,7 +96,7 @@ class LuaLexer(private val source: String) {
     while (!isAtEnd()) {
       val ch = peek()
       when {
-        ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\u000C' -> advance()
+        ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\u000C' || ch == '\uFEFF' || ch == '\u00A0' -> advance()
         ch == '-' && peek(1) == '-' -> {
           advance() // -
           advance() // -

@@ -330,5 +330,105 @@ print("SHA-256 prefix:", string.sub(hash, 1, 16))
         updatedAt = 5L,
         isBuiltIn = true,
       ),
+      ScriptEntity(
+        id = 6,
+        title = "LocalScript + UI Lib",
+        category = "Roblox UI",
+        code =
+          """-- LocalScript + ModuleScript UI Library + CanvasGroup + TextBox + Notification
+local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+
+local uiLib = Instance.new("ModuleScript")
+uiLib.Name = "NeonLib"
+uiLib.Source = [[
+local Lib = {}
+function Lib:CreateWindow(titleText)
+  local gui = Instance.new("ScreenGui", gethui())
+  gui.Name = "NeonLibGui"
+
+  local group = Instance.new("CanvasGroup", gui)
+  group.Name = "WindowGroup"
+  group.Position = UDim2.new(0.06, 0, 0.08, 0)
+  group.Size = UDim2.new(0.88, 0, 0.84, 0)
+  group.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
+  group.GroupTransparency = 0.04
+  group.Active = true
+  group.Draggable = true
+  Instance.new("UICorner", group).CornerRadius = UDim.new(0, 12)
+  local st = Instance.new("UIStroke", group)
+  st.Color = Color3.fromRGB(129, 140, 248)
+  st.Thickness = 1.5
+
+  local scaler = Instance.new("UIScale", group)
+  scaler.Scale = 1.0
+
+  local title = Instance.new("TextLabel", group)
+  title.Position = UDim2.new(0.05, 0, 0.08, 0)
+  title.Size = UDim2.new(0.90, 0, 0.22, 0)
+  title.BackgroundColor3 = Color3.fromRGB(28, 35, 54)
+  title.TextColor3 = Color3.fromRGB(224, 231, 255)
+  title.RichText = true
+  title.Text = "<b>" .. titleText .. "</b>"
+  Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+  return { Gui = gui, Root = group, Scale = scaler }
+end
+return Lib
+]]
+
+local NeonLib = require(uiLib)
+local win = NeonLib:CreateWindow("NEON UI LIB // LOCALSCRIPT")
+
+local inputBox = Instance.new("TextBox", win.Root)
+inputBox.Name = "CommandInput"
+inputBox.Position = UDim2.new(0.05, 0, 0.36, 0)
+inputBox.Size = UDim2.new(0.90, 0, 0.24, 0)
+inputBox.BackgroundColor3 = Color3.fromRGB(22, 27, 40)
+inputBox.PlaceholderText = "Tap to type a command..."
+inputBox.Text = ""
+Instance.new("UICorner", inputBox).CornerRadius = UDim.new(0, 8)
+local boxStroke = Instance.new("UIStroke", inputBox)
+boxStroke.Color = Color3.fromRGB(99, 102, 241)
+boxStroke.Thickness = 1
+
+local outLabel = Instance.new("TextLabel", win.Root)
+outLabel.Name = "OutputBadge"
+outLabel.Position = UDim2.new(0.05, 0, 0.66, 0)
+outLabel.Size = UDim2.new(0.90, 0, 0.24, 0)
+outLabel.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
+outLabel.Text = "Waiting for LocalScript..."
+Instance.new("UICorner", outLabel).CornerRadius = UDim.new(0, 8)
+
+inputBox:GetPropertyChangedSignal("Text"):Connect(function()
+  outLabel.Text = "Live Input: " .. inputBox.Text
+end)
+
+inputBox.FocusLost:Connect(function(enterPressed)
+  if enterPressed and #inputBox.Text > 0 then
+    local payload = HttpService:JSONEncode({ cmd = inputBox.Text })
+    print("Submitted JSON:", payload)
+    StarterGui:SetCore("SendNotification", {
+      Title = "UI Command",
+      Text = inputBox.Text,
+      Duration = 3
+    })
+  end
+end)
+
+-- Child LocalScript executes automatically when parented under GUI!
+local ls = Instance.new("LocalScript")
+ls.Name = "StatusRunner"
+ls.Source = [[
+print("Child LocalScript booted inside:", script.Parent.Name)
+local badge = script.Parent:FindFirstChild("OutputBadge")
+if badge then
+  badge.Text = "LocalScript Active — Tap TextBox!"
+end
+]]
+ls.Parent = win.Root
+""",
+        updatedAt = 13L,
+        isBuiltIn = true,
+      ),
     )
 }

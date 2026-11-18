@@ -313,4 +313,92 @@ object LucideIcons {
       "M19 21 H5",
     )
   }
+
+  val ClipboardPaste: ImageVector by lazy {
+    lucideIcon(
+      "lucide_clipboard_paste",
+      "M15 2 H9 A1 1 0 0 0 8 3 V5 A1 1 0 0 0 9 6 H15 A1 1 0 0 0 16 5 V3 A1 1 0 0 0 15 2 Z",
+      "M16 4 H18 A2 2 0 0 1 20 6 V10",
+      "M8 4 H6 A2 2 0 0 0 4 6 V20 A2 2 0 0 0 6 22 H10",
+      "M13 14 H19 A2 2 0 0 1 21 16 V20 A2 2 0 0 1 19 22 H13 A2 2 0 0 1 11 20 V16 A2 2 0 0 1 13 14 Z",
+    )
+  }
+
+  val CheckSquare: ImageVector by lazy {
+    lucideIcon(
+      "lucide_check_square",
+      "M9 11 L12 14 L22 4",
+      "M21 12 V19 A2 2 0 0 1 19 21 H5 A2 2 0 0 1 3 19 V5 A2 2 0 0 1 5 3 H16",
+    )
+  }
+
+  val Eraser: ImageVector by lazy {
+    lucideIcon(
+      "lucide_eraser",
+      "M7 21 H21",
+      "M2.9 14.3 L12.7 4.5 A2 2 0 0 1 15.5 4.5 L19.5 8.5 A2 2 0 0 1 19.5 11.3 L9.7 21.1 H6.3 L2.9 17.7 A2.4 2.4 0 0 1 2.9 14.3 Z",
+      "M8.5 8.5 L15.5 15.5",
+    )
+  }
+
+  val ImageIcon: ImageVector by lazy {
+    lucideIcon(
+      "lucide_image",
+      "M5 3 H19 A2 2 0 0 1 21 5 V19 A2 2 0 0 1 19 21 H5 A2 2 0 0 1 3 19 V5 A2 2 0 0 1 5 3 Z",
+      "M9 9 A2 2 0 1 0 9 9.01",
+      "M21 15 L16 10 L5 21",
+    )
+  }
+
+  val Sparkles: ImageVector by lazy {
+    lucideIcon(
+      "lucide_sparkles",
+      "M12 3 L13.8 8.2 L19 10 L13.8 11.8 L12 17 L10.2 11.8 L5 10 L10.2 8.2 Z",
+      "M5 17 L5.7 19.3 L8 20 L5.7 20.7 L5 23 L4.3 20.7 L2 20 L4.3 19.3 Z",
+      "M19 2 L19.5 3.5 L21 4 L19.5 4.5 L19 6 L18.5 4.5 L17 4 L18.5 3.5 Z",
+    )
+  }
+
+  val Film: ImageVector by lazy {
+    lucideIcon(
+      "lucide_film",
+      "M4 3 H20 A2 2 0 0 1 22 5 V19 A2 2 0 0 1 20 21 H4 A2 2 0 0 1 2 19 V5 A2 2 0 0 1 4 3 Z",
+      "M7 3 V21",
+      "M17 3 V21",
+      "M2 12 H22",
+      "M2 7.5 H7",
+      "M2 16.5 H7",
+      "M17 7.5 H22",
+      "M17 16.5 H22",
+    )
+  }
+
+  val Volume2: ImageVector by lazy {
+    lucideIcon(
+      "lucide_volume_2",
+      "M11 5 L6 9 H2 V15 H6 L11 19 Z",
+      "M15.54 8.46 A5 5 0 0 1 15.54 15.54",
+      "M19.07 4.93 A10 10 0 0 1 19.07 19.07",
+    )
+  }
+
+  val VolumeX: ImageVector by lazy {
+    lucideIcon(
+      "lucide_volume_x",
+      "M11 5 L6 9 H2 V15 H6 L11 19 Z",
+      "M22 9 L16 15",
+      "M16 9 L22 15",
+    )
+  }
+
+  val Palette: ImageVector by lazy {
+    lucideIcon(
+      "lucide_palette",
+      "M12 2 A10 10 0 0 0 2 12 C2 17.5 6.5 22 12 22 C13.1 22 14 21.1 14 20 C14 19.5 13.8 19 13.5 18.7 C13.2 18.3 13 17.9 13 17.4 C13 16.3 13.9 15.4 15 15.4 H17.4 C19.9 15.4 22 13.3 22 10.8 C22 5.9 17.5 2 12 2 Z",
+      "M7.5 11.5 A1 1 0 1 0 7.5 11.51",
+      "M10.5 7.5 A1 1 0 1 0 10.5 7.51",
+      "M15.5 7.5 A1 1 0 1 0 15.5 7.51",
+      "M17.5 11.5 A1 1 0 1 0 17.5 11.51",
+    )
+  }
 }

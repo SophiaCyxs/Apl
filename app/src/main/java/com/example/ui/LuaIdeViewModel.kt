@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AppDatabase
@@ -27,7 +28,9 @@ import com.example.lua.RobloxSandboxEnv
 import com.example.lua.TerminalFrameRenderer
 import com.example.lua.TerminalFrameSnapshot
 import com.example.lua.TerminalLogEntry
+import com.example.ui.theme.BackgroundMode
 import com.example.ui.theme.CodeFontFamily
+import com.example.ui.theme.SyntaxGradientPreset
 import com.example.ui.theme.ThemePalette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +47,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -114,6 +119,9 @@ class LuaIdeViewModel(application: Application) : AndroidViewModel(application) 
   private val _compileStatus = MutableStateFlow<CompileStatus>(CompileStatus.Idle)
   val compileStatus: StateFlow<CompileStatus> = _compileStatus.asStateFlow()
 
+  private val _compileTriggerSeq = MutableStateFlow(0L)
+  val compileTriggerSeq: StateFlow<Long> = _compileTriggerSeq.asStateFlow()
+
   private val _isRunning = MutableStateFlow(false)
   val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
@@ -136,7 +144,7 @@ class LuaIdeViewModel(application: Application) : AndroidViewModel(application) 
   private val frameCounter = AtomicLong(0L)
   private val uiDirty = AtomicBoolean(true)
   @Volatile private var guiViewportW = 380f
-  @Volatile private var guiViewportH = 236f
+  @Volatile private var guiViewportH = 240f
 
   private val vmDispatcher = Dispatchers.Default.limitedParallelism(1)
   private var sandboxScope: CoroutineScope? = null
@@ -155,7 +163,6 @@ class LuaIdeViewModel(application: Application) : AndroidViewModel(application) 
         }
       }
     }
-    // Render an initial blank terminal frame bezel
     refreshEmptyFrame()
   }
 
@@ -181,6 +188,7 @@ class LuaIdeViewModel(application: Application) : AndroidViewModel(application) 
         frameNumber = 0L,
         deltaMs = 0L,
         monochromeGui = s.monochromeGuiPreview,
+        notifications = emptyList(),
       )
   }
 
@@ -272,6 +280,57 @@ print("Running $cleanTitle")
     }
   }
 
+  fun compileManually() {
+    compileDebounceJob?.cancel()
+    val code = _editorCode.value
+    val name = _editorTitle.value
+    viewModelScope.launch {
+      val result =
+        withContext(Dispatchers.Default) {
+          val t0 = System.nanoTime()
+          try {
+            val proto = compiler.compile(code, name)
+            val elapsedUs = (System.nanoTime() - t0) / 1000L
+            CompileStatus.Success(
+              instructionCount = countInstructions(proto),
+              protoCount = countProtos(proto),
+              compileTimeUs = elapsedUs,
+              disassembly = proto.disassemble(),
+            )
+          } catch (e: LuaCompileException) {
+            CompileStatus.Error(
+              message = e.message,
+              line = e.line,
+              column = e.column,
+              stage = e.stage,
+            )
+          } catch (e: Exception) {
+            CompileStatus.Error(
+              message = e.message ?: "Unexpected compiler error",
+              line = 1,
+              column = 1,
+              stage = "Compiler",
+            )
+          }
+        }
+      _compileStatus.value = result
+      _compileTriggerSeq.value = _compileTriggerSeq.value + 1L
+      when (result) {
+        is CompileStatus.Success ->
+          appendLog(
+            LogLevel.SYSTEM,
+            "Compiled '$name' -> Lua 5.1 OK (${result.instructionCount} opcodes, ${result.protoCount} chunks, ${result.compileTimeUs}µs)",
+          )
+        is CompileStatus.Error ->
+          appendLog(
+            LogLevel.ERROR,
+            "Compile failed [${result.stage} L${result.line}:${result.column}]: ${result.message}",
+          )
+        CompileStatus.Idle -> Unit
+      }
+    }
+  }
+
   fun compileNow(code: String = _editorCode.value, name: String = _editorTitle.value): FunctionProto? {
     val t0 = System.nanoTime()
     return try {
@@ -319,7 +378,6 @@ print("Running $cleanTitle")
       return
     }
 
-    // Auto-save edits when executing
     val currentId = _activeScriptId.value
     val existing = scripts.value.firstOrNull { it.id == currentId }
     if (existing != null && _hasUnsavedChanges.value) {
@@ -344,6 +402,8 @@ print("Running $cleanTitle")
         onLog = { lvl, msg -> appendLog(lvl, msg) },
         onUiDirty = { uiDirty.set(true) },
         onClipboard = { text -> copyToSystemClipboard(text) },
+        getViewportSize = { guiViewportW to guiViewportH },
+        isHttpGetEnabled = { settings.value.enableHttpGet },
       )
     env.attachToVm(vm)
     vm.globalEnv.rawSet(LuaValue.Str("__env_root"), env.genv)
@@ -353,66 +413,62 @@ print("Running $cleanTitle")
 
     appendLog(
       LogLevel.SYSTEM,
-      "Compiled '$name' (${countInstructions(proto)} opcodes) • Executing in RBX 5.1 Self-Env @ ${settings.value.executionIntervalMs}ms",
+      "Compiled '$name' (${countInstructions(proto)} opcodes) • Executing RBX 5.1 @ ${settings.value.executionIntervalMs}ms",
     )
 
-    // Frame renderer loop paced by user's Execution Interval setting
+    // Render loop: updates whenever UI is dirty (and slows smoothly if idle)
     scope.launch {
       var lastFrameTime = System.currentTimeMillis()
       while (isActive) {
         val currentSettings = settings.value
         val intervalMs = currentSettings.executionIntervalMs.toLong().coerceIn(16L, 2000L)
-        if (uiDirty.getAndSet(false)) {
+        val hasTimedNotifs = env.notifications.isNotEmpty()
+        if (uiDirty.getAndSet(false) || hasTimedNotifs) {
           val now = System.currentTimeMillis()
           val dt = (now - lastFrameTime).coerceAtLeast(1L)
           lastFrameTime = now
-          val fNum = frameCounter.incrementAndGet()
-          val scene =
-            guiProcessor.process(
-              roots = env.uiRoots(),
-              drawings = env.drawings,
-              viewportW = guiViewportW,
-              viewportH = guiViewportH,
-              frameNumber = fNum,
-              deltaMs = dt,
-              monochromeGui = currentSettings.monochromeGuiPreview,
-            )
-          _guiScene.value = scene
-          val snapshot =
-            frameRenderer.render(
-              roots = env.uiRoots(),
-              drawings = env.drawings,
-              columns = currentSettings.terminalColumns,
-              rows = currentSettings.terminalRows,
-              frameNumber = fNum,
-              deltaMs = dt,
-              darkTheme = currentSettings.darkMode,
-              monochrome = currentSettings.themePalette == ThemePalette.MONOCHROME,
-            )
-          _frameSnapshot.value = snapshot
-          val diffLog = scene.diffSummary ?: snapshot.diffSummary
-          if (currentSettings.showFrameDiffLogs && diffLog != null) {
-            appendLog(LogLevel.FRAME, diffLog)
-          }
-          refreshInspector(env, vm)
+          emitSceneAndSnapshot(env, vm, dt)
         }
         delay(intervalMs)
       }
     }
 
-    // Start RunService loop
-    env.startServiceLoop(vm)
+    // Start RunService loop; auto-stops if loop errors out
+    env.startServiceLoop(vm) {
+      _isRunning.value = false
+    }
 
-    // Execute compiled main chunk
+    // Execute compiled main chunk + manage RUN/IDLE lifecycle accurately
     scope.launch {
       try {
         vm.resetOpCounters()
         vm.execute(proto, env.genv)
         uiDirty.set(true)
-        refreshInspector(env, vm)
-        appendLog(LogLevel.SYSTEM, "Main chunk completed (${vm.totalOpsExecuted} VM ops). Sandbox listeners remain active.")
+        emitSceneAndSnapshot(env, vm, settings.value.executionIntervalMs.toLong())
+
+        if (!env.hasActiveLoopListeners()) {
+          _isRunning.value = false
+          appendLog(
+            LogLevel.SYSTEM,
+            "Completed (${vm.cumulativeOpsExecuted} ops). Canvas widgets remain interactive.",
+          )
+        } else {
+          appendLog(
+            LogLevel.SYSTEM,
+            "Main chunk ready (${vm.cumulativeOpsExecuted} ops) • Active loop/tasks running.",
+          )
+          while (isActive && _isRunning.value && env.hasActiveLoopListeners()) {
+            delay(140L)
+          }
+          if (isActive && _isRunning.value) {
+            _isRunning.value = false
+            uiDirty.set(true)
+            emitSceneAndSnapshot(env, vm, settings.value.executionIntervalMs.toLong())
+            appendLog(LogLevel.SYSTEM, "All RunService loops & tasks completed.")
+          }
+        }
       } catch (_: CancellationException) {
-        // Stopped by user
+        // Halted explicitly by user
       } catch (e: LuaRuntimeException) {
         appendLog(LogLevel.ERROR, e.message)
         _isRunning.value = false
@@ -421,6 +477,40 @@ print("Running $cleanTitle")
         _isRunning.value = false
       }
     }
+  }
+
+  private fun emitSceneAndSnapshot(env: RobloxSandboxEnv, vm: LuaVm, deltaMs: Long) {
+    val currentSettings = settings.value
+    val fNum = frameCounter.incrementAndGet()
+    val scene =
+      guiProcessor.process(
+        roots = env.uiRoots(),
+        drawings = env.drawings,
+        viewportW = guiViewportW,
+        viewportH = guiViewportH,
+        frameNumber = fNum,
+        deltaMs = deltaMs,
+        monochromeGui = currentSettings.monochromeGuiPreview,
+        notifications = env.activeNotifications(),
+      )
+    _guiScene.value = scene
+    val snapshot =
+      frameRenderer.render(
+        roots = env.uiRoots(),
+        drawings = env.drawings,
+        columns = currentSettings.terminalColumns,
+        rows = currentSettings.terminalRows,
+        frameNumber = fNum,
+        deltaMs = deltaMs,
+        darkTheme = currentSettings.darkMode,
+        monochrome = currentSettings.themePalette == ThemePalette.MONOCHROME,
+      )
+    _frameSnapshot.value = snapshot
+    val diffLog = scene.diffSummary ?: snapshot.diffSummary
+    if (currentSettings.showFrameDiffLogs && diffLog != null) {
+      appendLog(LogLevel.FRAME, diffLog)
+    }
+    refreshInspector(env, vm)
   }
 
   fun stopExecution(silent: Boolean = false) {
@@ -442,7 +532,18 @@ print("Running $cleanTitle")
     scope.launch {
       env.triggerButtonClick(vm, instanceId)
       uiDirty.set(true)
-      refreshInspector(env, vm)
+      emitSceneAndSnapshot(env, vm, settings.value.executionIntervalMs.toLong())
+    }
+  }
+
+  fun submitTextBoxInput(instanceId: Int, text: String) {
+    val scope = sandboxScope ?: return
+    val vm = activeVm ?: return
+    val env = activeEnv ?: return
+    scope.launch {
+      env.submitTextBoxInput(vm, instanceId, text)
+      uiDirty.set(true)
+      emitSceneAndSnapshot(env, vm, settings.value.executionIntervalMs.toLong())
     }
   }
 
@@ -466,6 +567,7 @@ print("Running $cleanTitle")
           frameNumber = frameCounter.get(),
           deltaMs = s.executionIntervalMs.toLong(),
           monochromeGui = s.monochromeGuiPreview,
+          notifications = env.activeNotifications(),
         )
     }
   }
@@ -478,6 +580,7 @@ print("Running $cleanTitle")
     dyLogical: Double,
   ) {
     val scope = sandboxScope ?: return
+    val vm = activeVm ?: return
     val env = activeEnv ?: return
     scope.launch {
       env.applyDragDelta(instanceId, dxNorm, dyNorm, dxLogical, dyLogical)
@@ -491,7 +594,9 @@ print("Running $cleanTitle")
           frameNumber = frameCounter.get(),
           deltaMs = s.executionIntervalMs.toLong(),
           monochromeGui = s.monochromeGuiPreview,
+          notifications = env.activeNotifications(),
         )
+      refreshInspector(env, vm)
     }
   }
 
@@ -541,6 +646,7 @@ print("Running $cleanTitle")
         frameNumber = frameCounter.get(),
         deltaMs = settings.value.executionIntervalMs.toLong(),
         monochromeGui = monochromeGui,
+        notifications = env?.activeNotifications() ?: emptyList(),
       )
   }
 
@@ -624,6 +730,167 @@ print("Running $cleanTitle")
     }
   }
 
+  fun setEnableHttpGet(enabled: Boolean) {
+    viewModelScope.launch { settingsRepo.update { it.copy(enableHttpGet = enabled) } }
+  }
+
+  fun setSyntaxGradientEnabled(enabled: Boolean) {
+    viewModelScope.launch { settingsRepo.update { it.copy(syntaxGradientEnabled = enabled) } }
+  }
+
+  fun setSyntaxGradientMoving(moving: Boolean) {
+    viewModelScope.launch { settingsRepo.update { it.copy(syntaxGradientMoving = moving) } }
+  }
+
+  fun setFontGradientMoving(moving: Boolean) {
+    viewModelScope.launch { settingsRepo.update { it.copy(fontGradientMoving = moving) } }
+  }
+
+  fun setGradientPreset(preset: SyntaxGradientPreset) {
+    viewModelScope.launch { settingsRepo.update { it.copy(gradientPreset = preset) } }
+  }
+
+  fun setGradientSpeed(speed: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(gradientSpeed = speed.coerceIn(0.2f, 3f)) } }
+  }
+
+  fun setSyntaxTokenColor(tokenKey: String, argb: Long) {
+    viewModelScope.launch {
+      settingsRepo.update { cur ->
+        when (tokenKey) {
+          "keyword" -> cur.copy(syntaxKeywordArgb = argb)
+          "type" -> cur.copy(syntaxTypeArgb = argb)
+          "executor" -> cur.copy(syntaxExecutorArgb = argb)
+          "builtin" -> cur.copy(syntaxBuiltinArgb = argb)
+          "string" -> cur.copy(syntaxStringArgb = argb)
+          "number" -> cur.copy(syntaxNumberArgb = argb)
+          "comment" -> cur.copy(syntaxCommentArgb = argb)
+          "operator" -> cur.copy(syntaxOperatorArgb = argb)
+          else -> cur
+        }
+      }
+    }
+  }
+
+  fun resetSyntaxColors() {
+    viewModelScope.launch {
+      settingsRepo.update {
+        it.copy(
+          syntaxKeywordArgb = 0L,
+          syntaxTypeArgb = 0L,
+          syntaxExecutorArgb = 0L,
+          syntaxBuiltinArgb = 0L,
+          syntaxStringArgb = 0L,
+          syntaxNumberArgb = 0L,
+          syntaxCommentArgb = 0L,
+          syntaxOperatorArgb = 0L,
+        )
+      }
+    }
+  }
+
+  fun setBackgroundMode(mode: BackgroundMode) {
+    viewModelScope.launch { settingsRepo.update { it.copy(backgroundMode = mode) } }
+  }
+
+  fun setGalaxySpeed(speed: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(galaxySpeed = speed.coerceIn(0.2f, 3f)) } }
+  }
+
+  fun setGalaxyStarDensity(density: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(galaxyStarDensity = density.coerceIn(0.25f, 2f)) } }
+  }
+
+  fun setBackgroundBlurDp(blurDp: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(backgroundBlurDp = blurDp.coerceIn(0f, 24f)) } }
+  }
+
+  fun setBackgroundDimAlpha(alpha: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(backgroundDimAlpha = alpha.coerceIn(0f, 0.85f)) } }
+  }
+
+  fun setPanelOpacity(opacity: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(panelOpacity = opacity.coerceIn(0.35f, 1f)) } }
+  }
+
+  fun setPanelShadowDp(shadowDp: Float) {
+    viewModelScope.launch { settingsRepo.update { it.copy(panelShadowDp = shadowDp.coerceIn(0f, 24f)) } }
+  }
+
+  fun setBackgroundVideoMuted(muted: Boolean) {
+    viewModelScope.launch { settingsRepo.update { it.copy(backgroundVideoMuted = muted) } }
+  }
+
+  fun pickCustomBackground(uri: Uri) {
+    viewModelScope.launch {
+      val app = getApplication<Application>()
+      val mime = runCatching { app.contentResolver.getType(uri) }.getOrNull().orEmpty()
+      val isVideo =
+        mime.startsWith("video/", ignoreCase = true) ||
+          uri.toString().lowercase().let {
+            it.endsWith(".mp4") || it.endsWith(".mkv") || it.endsWith(".webm") || it.endsWith(".mov")
+          }
+      val oldImagePath = settings.value.customBackgroundPath
+      val oldVideoPath = settings.value.customVideoPath
+      val savedPath =
+        withContext(Dispatchers.IO) {
+          try {
+            val ext = if (isVideo) "mp4" else "img"
+            val dest = File(app.filesDir, "custom_bg_${System.currentTimeMillis()}.$ext")
+            app.contentResolver.openInputStream(uri)?.use { input ->
+              dest.outputStream().use { output -> input.copyTo(output) }
+            } ?: return@withContext null
+            val previous = if (isVideo) oldVideoPath else oldImagePath
+            if (previous.isNotEmpty() && previous != dest.absolutePath) {
+              runCatching { File(previous).delete() }
+            }
+            dest.absolutePath
+          } catch (_: Exception) {
+            null
+          }
+        }
+      if (savedPath != null) {
+        if (isVideo) {
+          settingsRepo.update {
+            it.copy(
+              customVideoPath = savedPath,
+              backgroundMode = BackgroundMode.CUSTOM_VIDEO,
+            )
+          }
+          appendLog(LogLevel.SYSTEM, "Updated custom MP4 video wallpaper.")
+        } else {
+          settingsRepo.update {
+            it.copy(
+              customBackgroundPath = savedPath,
+              backgroundMode = BackgroundMode.CUSTOM_IMAGE,
+            )
+          }
+          appendLog(LogLevel.SYSTEM, "Updated custom workspace wallpaper.")
+        }
+      } else {
+        appendLog(LogLevel.WARN, "Failed to read selected media.")
+      }
+    }
+  }
+
+  fun clearCustomBackground() {
+    viewModelScope.launch {
+      val oldImagePath = settings.value.customBackgroundPath
+      val oldVideoPath = settings.value.customVideoPath
+      withContext(Dispatchers.IO) {
+        if (oldImagePath.isNotEmpty()) runCatching { File(oldImagePath).delete() }
+        if (oldVideoPath.isNotEmpty()) runCatching { File(oldVideoPath).delete() }
+      }
+      settingsRepo.update {
+        it.copy(
+          customBackgroundPath = "",
+          customVideoPath = "",
+          backgroundMode = BackgroundMode.GALAXY,
+        )
+      }
+    }
+  }
+
   fun resetSettings() {
     viewModelScope.launch {
       settingsRepo.resetDefaults()
@@ -668,7 +935,7 @@ print("Running $cleanTitle")
         virtualFiles = fsList,
         uiTree = tree,
         drawingCount = env.drawings.size,
-        opsExecuted = vm.totalOpsExecuted,
+        opsExecuted = vm.cumulativeOpsExecuted,
       )
   }
 

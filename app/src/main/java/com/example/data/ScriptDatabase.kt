@@ -74,7 +74,7 @@ class ScriptRepository(private val dao: ScriptDao) {
     } else {
       for (preset in SampleScripts.presets) {
         val existing = dao.getById(preset.id)
-        if (existing != null && existing.isBuiltIn && existing.updatedAt < preset.updatedAt) {
+        if (existing == null || (existing.isBuiltIn && existing.updatedAt < preset.updatedAt)) {
           dao.upsert(preset)
         }
       }
